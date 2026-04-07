@@ -117,10 +117,13 @@ const NOWCAST_RADAR_BG_TOLERANCE = 20;
 const NOWCAST_GRAY_BG_RGB = [202, 202, 202];
 const NOWCAST_GRAY_BG_TOLERANCE = 34;
 const NOWCAST_COLOR_ALPHA = 0.86;
-const NOWCAST_EDGE_CUT_STYLE = true;
+const NOWCAST_EDGE_CUT_STYLE = false;
 const NOWCAST_EDGE_CUT_ALPHA = 0.8;
 const NOWCAST_EDGE_CUT_BRIGHTEN = 12;
 const NOWCAST_EDGE_COLOR_DIFF = 42;
+const NOWCAST_PIXEL_GAP_OVERLAY = true;
+const NOWCAST_PIXEL_GAP_MIN_SCREEN_PX = 3;
+const NOWCAST_PIXEL_GAP_MAX_SCREEN_PX = 1.25;
 let frameRenderToken = 0;
 const nowcastBlobUrlCache = new Map();
 const nowcastBlobUrlOrder = [];
@@ -344,6 +347,7 @@ function getSatelliteTileSource(urlTemplate) {
     crossOrigin: "anonymous",
     wrapX: false,
     tileSize: 256,
+    interpolate: false,
     tileLoadFunction: async (tile, src) => {
       const img = tile.getImage();
       const cached = satelliteTileStyleCache.get(src);
@@ -558,12 +562,13 @@ function createMap() {
   });
 
   frameLayer = new ol.layer.Image({
+    className: "radar-layer",
     source: new ol.source.ImageStatic({
       url: TRANSPARENT_PIXEL,
       projection: "EPSG:4326",
       imageExtent: geoBounds,
-      // Более мягкое масштабирование, чтобы уменьшить пикселизацию.
-      interpolate: true,
+      // Для радарной сетки используем nearest-neighbor, чтобы не замыливать пиксели.
+      interpolate: false,
     }),
     opacity: HD_LAYER_OPACITY,
     zIndex: 5,
@@ -587,6 +592,7 @@ function createMap() {
       zoom: 4,
     }),
   });
+  frameLayer.on("postrender", renderNowcastPixelGapOverlay);
 
   measureLayer = new ol.layer.Vector({
     source: new ol.source.Vector(),
@@ -626,6 +632,13 @@ function createMap() {
       drawCurrentStroke.push(event.coordinate);
       drawCurrentStrokeFeature.getGeometry().setCoordinates(drawCurrentStroke);
     }
+  });
+  map.getView().on("change:resolution", () => {
+    if (!frames.length) return;
+    if (activeSource === SOURCE_HD || activeSource === SOURCE_SATELLITE) return;
+    renderFrame(currentFrame).catch((e) => {
+      console.warn("Nowcast rerender on zoom failed:", e);
+    });
   });
 
   map.on("pointerdown", (event) => {
@@ -670,6 +683,67 @@ function createMap() {
     renderMeasurement();
     setStatus("Новый замер: выберите вторую точку.");
   });
+}
+
+function renderNowcastPixelGapOverlay(event) {
+  if (!NOWCAST_PIXEL_GAP_OVERLAY) return;
+  if (!map || activeSource === SOURCE_HD || activeSource === SOURCE_SATELLITE) return;
+  const frame = frames[currentFrame];
+  if (!frame || !Array.isArray(frame.imageExtent) || frame.imageExtent.length !== 4) return;
+  const width = Number(frame.imageWidth || radarImageSize?.[0] || 0);
+  const height = Number(frame.imageHeight || radarImageSize?.[1] || 0);
+  if (!(width > 1 && height > 1)) return;
+  const ctx = event?.context;
+  if (!ctx) return;
+
+  const [west, south, east, north] = frame.imageExtent;
+  const topLeft = map.getPixelFromCoordinate([west, north]);
+  const topRight = map.getPixelFromCoordinate([east, north]);
+  const bottomLeft = map.getPixelFromCoordinate([west, south]);
+  if (!topLeft || !topRight || !bottomLeft) return;
+
+  const renderWidthCss = Math.abs(topRight[0] - topLeft[0]);
+  const renderHeightCss = Math.abs(bottomLeft[1] - topLeft[1]);
+  if (!(renderWidthCss > 0 && renderHeightCss > 0)) return;
+
+  const pixelStepXCss = renderWidthCss / width;
+  const pixelStepYCss = renderHeightCss / height;
+  const minStepCss = Math.min(pixelStepXCss, pixelStepYCss);
+  if (!Number.isFinite(minStepCss) || minStepCss < NOWCAST_PIXEL_GAP_MIN_SCREEN_PX) return;
+
+  const pixelRatio = event?.frameState?.pixelRatio || window.devicePixelRatio || 1;
+  const gapWidthCss = Math.max(
+    0.35,
+    Math.min(NOWCAST_PIXEL_GAP_MAX_SCREEN_PX, minStepCss * 0.16),
+  );
+  const alpha = Math.max(0.08, Math.min(0.24, 0.06 + minStepCss * 0.02));
+
+  const leftCss = Math.min(topLeft[0], topRight[0]);
+  const rightCss = Math.max(topLeft[0], topRight[0]);
+  const topCss = Math.min(topLeft[1], bottomLeft[1]);
+  const bottomCss = Math.max(topLeft[1], bottomLeft[1]);
+  const stepX = pixelStepXCss * pixelRatio;
+  const stepY = pixelStepYCss * pixelRatio;
+  const left = leftCss * pixelRatio;
+  const right = rightCss * pixelRatio;
+  const top = topCss * pixelRatio;
+  const bottom = bottomCss * pixelRatio;
+  const gapWidth = gapWidthCss * pixelRatio;
+
+  ctx.save();
+  ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
+  ctx.lineWidth = gapWidth;
+  ctx.beginPath();
+  for (let x = left + stepX; x < right; x += stepX) {
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom);
+  }
+  for (let y = top + stepY; y < bottom; y += stepY) {
+    ctx.moveTo(left, y);
+    ctx.lineTo(right, y);
+  }
+  ctx.stroke();
+  ctx.restore();
 }
 
 function normalizeFrames(payload) {
@@ -745,8 +819,8 @@ function setFrameExtentAndUrl(extent, url, projection) {
       url: url || TRANSPARENT_PIXEL,
       projection: projection || "EPSG:4326",
       imageExtent: extent,
-      // Более мягкое масштабирование, чтобы уменьшить пикселизацию.
-      interpolate: true,
+      // Для радарной сетки используем nearest-neighbor, чтобы не замыливать пиксели.
+      interpolate: false,
     }),
   );
 }
@@ -1020,6 +1094,8 @@ async function loadNowcastFrames(layerName) {
       timestamp: new Date(f.time || f.timestamp || Date.now()),
       projection: f.projection || "EPSG:3857",
       imageExtent: Array.isArray(f.imageExtent) ? f.imageExtent : geoBounds3857,
+      imageWidth: width,
+      imageHeight: height,
     }))
     .filter((f) => f.url && Array.isArray(f.imageExtent) && f.imageExtent.length === 4)
     .sort((a, b) => a.timestamp - b.timestamp);

@@ -142,6 +142,13 @@
         pointer-events: none;
         opacity: 0.8;
       }
+      .radar-layer canvas,
+      .radar-layer img {
+        image-rendering: pixelated;
+        image-rendering: -moz-crisp-edges;
+        image-rendering: crisp-edges;
+        image-rendering: -webkit-optimize-contrast;
+      }
       /* Поворот/масштаб эталона задаются в JS (панель «Эталон: масштаб и поворот») */
       .radar-layer.reference-test img {
         transform-origin: center center;
