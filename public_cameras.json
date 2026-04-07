@@ -1,0 +1,242 @@
+[
+  {
+    "title": "Москва: городские камеры",
+    "city": "Москва",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 37.6173,
+    "lat": 55.7558
+  },
+  {
+    "title": "Санкт-Петербург: городские камеры",
+    "city": "Санкт-Петербург",
+    "source": "geocam.ru",
+    "url": "https://www.geocam.ru/in/russia/city-views/",
+    "lon": 30.3351,
+    "lat": 59.9343
+  },
+  {
+    "title": "Казань: городские камеры",
+    "city": "Казань",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 49.1064,
+    "lat": 55.7963
+  },
+  {
+    "title": "Сочи: городские камеры",
+    "city": "Сочи",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 39.7231,
+    "lat": 43.5855
+  },
+  {
+    "title": "Краснодар: городские камеры",
+    "city": "Краснодар",
+    "source": "world-cam.ru",
+    "url": "https://world-cam.ru/cams/urban-views/",
+    "lon": 38.9747,
+    "lat": 45.0355
+  },
+  {
+    "title": "Ростов-на-Дону: городские камеры",
+    "city": "Ростов-на-Дону",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 39.7015,
+    "lat": 47.2357
+  },
+  {
+    "title": "Нижний Новгород: городские камеры",
+    "city": "Нижний Новгород",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 44.002,
+    "lat": 56.3269
+  },
+  {
+    "title": "Самара: городские камеры",
+    "city": "Самара",
+    "source": "geocam.ru",
+    "url": "https://www.geocam.ru/in/russia/city-views/",
+    "lon": 50.1501,
+    "lat": 53.1959
+  },
+  {
+    "title": "Уфа: городские камеры",
+    "city": "Уфа",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 55.9587,
+    "lat": 54.7388
+  },
+  {
+    "title": "Пермь: городские камеры",
+    "city": "Пермь",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 56.2467,
+    "lat": 58.0105
+  },
+  {
+    "title": "Екатеринбург: городские камеры",
+    "city": "Екатеринбург",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 60.6057,
+    "lat": 56.8389
+  },
+  {
+    "title": "Челябинск: городские камеры",
+    "city": "Челябинск",
+    "source": "world-cam.ru",
+    "url": "https://world-cam.ru/cams/urban-views/",
+    "lon": 61.4026,
+    "lat": 55.1603
+  },
+  {
+    "title": "Омск: городские камеры",
+    "city": "Омск",
+    "source": "world-cam.ru",
+    "url": "https://world-cam.ru/cams/urban-views/",
+    "lon": 73.3686,
+    "lat": 54.9885
+  },
+  {
+    "title": "Новосибирск: городские камеры",
+    "city": "Новосибирск",
+    "source": "geocam.ru",
+    "url": "https://www.geocam.ru/in/russia/city-views/",
+    "lon": 82.9204,
+    "lat": 55.0302
+  },
+  {
+    "title": "Красноярск: городские камеры",
+    "city": "Красноярск",
+    "source": "world-cam.ru",
+    "url": "https://world-cam.ru/cams/urban-views/",
+    "lon": 92.8526,
+    "lat": 56.0153
+  },
+  {
+    "title": "Иркутск: городские камеры",
+    "city": "Иркутск",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 104.2964,
+    "lat": 52.2869
+  },
+  {
+    "title": "Хабаровск: городские камеры",
+    "city": "Хабаровск",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 135.0719,
+    "lat": 48.4802
+  },
+  {
+    "title": "Владивосток: городские камеры",
+    "city": "Владивосток",
+    "source": "geocam.ru",
+    "url": "https://www.geocam.ru/in/russia/city-views/",
+    "lon": 131.8855,
+    "lat": 43.1155
+  },
+  {
+    "title": "Петропавловск-Камчатский: городские камеры",
+    "city": "Петропавловск-Камчатский",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 158.6483,
+    "lat": 53.037
+  },
+  {
+    "title": "Якутск: городские камеры",
+    "city": "Якутск",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 129.7326,
+    "lat": 62.0272
+  },
+  {
+    "title": "Мурманск: городские камеры",
+    "city": "Мурманск",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 33.0856,
+    "lat": 68.9707
+  },
+  {
+    "title": "Архангельск: городские камеры",
+    "city": "Архангельск",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 40.539,
+    "lat": 64.5393
+  },
+  {
+    "title": "Калининград: городские камеры",
+    "city": "Калининград",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 20.5101,
+    "lat": 54.7065
+  },
+  {
+    "title": "Тверь: городские камеры",
+    "city": "Тверь",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 35.9119,
+    "lat": 56.8587
+  },
+  {
+    "title": "Тула: городские камеры",
+    "city": "Тула",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 37.6176,
+    "lat": 54.193
+  },
+  {
+    "title": "Волгоград: городские камеры",
+    "city": "Волгоград",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 44.5169,
+    "lat": 48.708
+  },
+  {
+    "title": "Саратов: городские камеры",
+    "city": "Саратов",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 46.0342,
+    "lat": 51.5406
+  },
+  {
+    "title": "Астрахань: городские камеры",
+    "city": "Астрахань",
+    "source": "world-cam.ru",
+    "url": "https://world-cam.ru/cams/urban-views/",
+    "lon": 48.0408,
+    "lat": 46.3479
+  },
+  {
+    "title": "Оренбург: городские камеры",
+    "city": "Оренбург",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 55.0969,
+    "lat": 51.7682
+  },
+  {
+    "title": "Томск: городские камеры",
+    "city": "Томск",
+    "source": "youwebcams.org",
+    "url": "https://youwebcams.org/location/russia/",
+    "lon": 84.9541,
+    "lat": 56.501
+  }
+]

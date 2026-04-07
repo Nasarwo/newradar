@@ -1,0 +1,23 @@
+# Build / runtime
+*.exe
+server/*.exe
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Node (if frontend tooling is re-added)
+node_modules/
+
+# Generated caches (server recreates on run)
+frames/
+frames_warped/
+tmp_warp/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store

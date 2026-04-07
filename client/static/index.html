@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Радар осадков | Росгидромет</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/ol@10.6.1/ol.css"
+    />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: #ffffff;
+        color: #1f2328;
+        color-scheme: light;
+        overflow: hidden;
+        height: 100vh;
+      }
+      #map {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 1;
+      }
+      .ol-viewport {
+        background: #f6f8fa !important;
+        font-family: inherit;
+      }
+      .control-panel {
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 1000;
+        background: rgba(255, 255, 255, 0.97);
+        border: 1px solid #d0d7de;
+        border-radius: 12px;
+        padding: 16px 24px;
+        box-shadow:
+          0 4px 24px rgba(31, 35, 40, 0.12),
+          0 1px 3px rgba(31, 35, 40, 0.08);
+        min-width: 400px;
+        max-width: 90vw;
+      }
+      #timeline {
+        min-width: 140px;
+      }
+      .control-panel h3 {
+        font-size: 12px;
+        color: #57606a;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 12px;
+      }
+      .timeline-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 8px;
+      }
+      input[type="range"] {
+        flex: 1;
+        height: 6px;
+        background: #d8dee4;
+        border-radius: 3px;
+        -webkit-appearance: none;
+        appearance: none;
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 18px;
+        height: 18px;
+        background: #0969da;
+        border-radius: 50%;
+        cursor: pointer;
+        box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.2);
+      }
+      input[type="range"]::-moz-range-thumb {
+        width: 18px;
+        height: 18px;
+        background: #0969da;
+        border-radius: 50%;
+        cursor: pointer;
+        border: none;
+      }
+      .time-label {
+        font-variant-numeric: tabular-nums;
+        min-width: 90px;
+        font-size: 14px;
+        color: #24292f;
+      }
+      .play-btn {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        border: 1px solid #1a7f37;
+        background: #1a7f37;
+        color: #ffffff;
+        cursor: pointer;
+        font-size: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.2s;
+      }
+      .play-btn:hover {
+        background: #1f883d;
+      }
+      .play-btn.paused {
+        background: #f6f8fa;
+        color: #0969da;
+        border-color: #d0d7de;
+      }
+      .play-btn.paused:hover {
+        background: #eaeef2;
+      }
+      .status {
+        font-size: 12px;
+        color: #57606a;
+        margin-top: 8px;
+      }
+      .attribution {
+        position: absolute;
+        bottom: 90px;
+        right: 10px;
+        z-index: 500;
+        font-size: 10px;
+        color: #6e7781;
+      }
+      .radar-layer {
+        image-rendering: pixelated;
+        image-rendering: -moz-crisp-edges;
+        image-rendering: crisp-edges;
+        pointer-events: none;
+        opacity: 0.8;
+      }
+      /* Поворот/масштаб эталона задаются в JS (панель «Эталон: масштаб и поворот») */
+      .radar-layer.reference-test img {
+        transform-origin: center center;
+      }
+      .legend-panel {
+        position: absolute;
+        top: 20px;
+        right: 10px;
+        z-index: 1000;
+        background: rgba(255, 255, 255, 0.97);
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        padding: 10px 12px;
+        box-shadow:
+          0 4px 16px rgba(31, 35, 40, 0.1),
+          0 1px 3px rgba(31, 35, 40, 0.08);
+        font-size: 11px;
+        color: #24292f;
+        max-height: 70vh;
+        overflow-y: auto;
+      }
+      .legend-panel.legend-collapsed .legend-body {
+        display: none;
+      }
+      .legend-panel .legend-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .legend-panel .legend-header:hover {
+        color: #0969da;
+      }
+      .legend-title {
+        font-weight: 600;
+        color: #57606a;
+      }
+      .legend-panel.legend-collapsed .legend-toggle-icon {
+        transform: rotate(-90deg);
+      }
+      .legend-toggle-icon {
+        font-size: 10px;
+        color: #57606a;
+        transition: transform 0.2s;
+      }
+      .legend-panel caption {
+        text-align: left;
+        font-weight: 600;
+        color: #57606a;
+        margin-bottom: 6px;
+      }
+      .legend-panel table {
+        border-collapse: collapse;
+      }
+      .legend-panel td {
+        padding: 2px 6px;
+        vertical-align: middle;
+      }
+      .legend-panel .palette-color {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border-radius: 2px;
+        border: 1px solid #d0d7de;
+      }
+      .step-btns {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
+      .step-btn {
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        border: 1px solid #d0d7de;
+        background: #f6f8fa;
+        color: #0969da;
+        cursor: pointer;
+        font-size: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .step-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .step-btn:hover {
+        background: #eaeef2;
+      }
+      .step-btn.active {
+        background: #0969da;
+        color: #ffffff;
+        border-color: #0969da;
+      }
+      .playback-settings {
+        margin-top: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: #57606a;
+      }
+      .playback-settings select {
+        background: #ffffff;
+        color: #24292f;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        padding: 4px 8px;
+        outline: none;
+      }
+      .source-panel {
+        position: absolute;
+        top: 20px;
+        left: 10px;
+        z-index: 1100;
+        background: rgba(255, 255, 255, 0.97);
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        padding: 10px 12px;
+        box-shadow:
+          0 4px 16px rgba(31, 35, 40, 0.1),
+          0 1px 3px rgba(31, 35, 40, 0.08);
+        font-size: 12px;
+        color: #57606a;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .source-panel select {
+        min-width: 260px;
+        max-width: min(64vw, 440px);
+        background: #ffffff;
+        color: #24292f;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        padding: 4px 8px;
+        outline: none;
+      }
+
+      @media (max-width: 900px) {
+        .legend-panel {
+          top: 12px;
+          right: 12px;
+          max-width: min(74vw, 300px);
+          max-height: 52vh;
+          padding: 8px 10px;
+          font-size: 10px;
+        }
+        .source-panel {
+          top: 12px;
+          left: 12px;
+          max-width: min(74vw, 360px);
+          padding: 8px 10px;
+        }
+        .source-panel select {
+          min-width: 0;
+          max-width: 56vw;
+        }
+        .control-panel {
+          bottom: 12px;
+          width: calc(100vw - 24px);
+          min-width: 0;
+          max-width: calc(100vw - 24px);
+          padding: 12px;
+        }
+        .timeline-row {
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .step-btns {
+          width: 100%;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+        #timeline {
+          width: 100%;
+          flex: 1 1 100%;
+          order: 2;
+        }
+        .time-label {
+          order: 3;
+          min-width: 0;
+          font-size: 13px;
+        }
+      }
+
+      @media (max-width: 640px) {
+        body {
+          overflow: hidden;
+        }
+        .control-panel {
+          left: 8px;
+          right: 8px;
+          transform: none;
+          width: auto;
+          max-width: none;
+          bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+          border-radius: 10px;
+          padding: 10px;
+        }
+        .control-panel h3 {
+          font-size: 11px;
+          margin-bottom: 8px;
+        }
+        .play-btn {
+          width: 40px;
+          height: 40px;
+          font-size: 16px;
+        }
+        .step-btn {
+          width: 34px;
+          height: 34px;
+          border-radius: 7px;
+          font-size: 13px;
+        }
+        .playback-settings {
+          margin-top: 6px;
+          gap: 6px;
+          font-size: 11px;
+          flex-wrap: wrap;
+        }
+        .playback-settings select {
+          font-size: 12px;
+          padding: 3px 6px;
+        }
+        .status {
+          margin-top: 6px;
+          font-size: 11px;
+          line-height: 1.3;
+        }
+        .attribution {
+          right: 8px;
+          bottom: calc(120px + env(safe-area-inset-bottom, 0px));
+          font-size: 9px;
+        }
+        .legend-panel {
+          left: 8px;
+          right: auto;
+          top: calc(8px + env(safe-area-inset-top, 0px));
+          max-width: calc(100vw - 16px);
+          width: auto;
+          max-height: 42vh;
+        }
+        .source-panel {
+          left: 8px;
+          right: 8px;
+          top: calc(8px + env(safe-area-inset-top, 0px));
+          width: auto;
+          max-width: none;
+          gap: 6px;
+          font-size: 11px;
+          padding: 8px 10px;
+        }
+        .source-panel select {
+          min-width: 0;
+          width: 100%;
+          max-width: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div class="source-panel">
+      <span>Слой:</span>
+      <select id="sourceLayerSelect" title="Активный слой осадков">
+        <option value="__hd__">Опасные явления HD</option>
+      </select>
+    </div>
+
+    <div class="legend-panel" id="legendPanel">
+      <div
+        class="legend-header"
+        id="legendToggle"
+        title="Свернуть / развернуть"
+      >
+        <span class="legend-title">Легенда осадков</span>
+        <span class="legend-toggle-icon">▼</span>
+      </div>
+      <div class="legend-body">
+        <table>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #9caab3"></span>
+            </td>
+            <td>Облака в ср. яр.</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #a2c6fe"></span>
+            </td>
+            <td>Слоистая обл.</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #46fe95"></span>
+            </td>
+            <td>Осадки: слабые</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #01c25e"></span>
+            </td>
+            <td>Осадки: умеренные</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #019a08"></span>
+            </td>
+            <td>Осадки: сильные</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #ffff83"></span>
+            </td>
+            <td>Кучевая облачность</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #3e89fd"></span>
+            </td>
+            <td>Ливневые: слабые</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #013aff"></span>
+            </td>
+            <td>Ливневые: умеренные</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #020877"></span>
+            </td>
+            <td>Ливневые: сильные</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #ffab80"></span>
+            </td>
+            <td>Гроза: (R)</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #ff5984"></span>
+            </td>
+            <td>Гроза: R</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #fd0609"></span>
+            </td>
+            <td>Гроза: R+</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #cd6908"></span>
+            </td>
+            <td>Град: слабый</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #8f490f"></span>
+            </td>
+            <td>Град: умеренный</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #580e08"></span>
+            </td>
+            <td>Град: сильный</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #ffabff"></span>
+            </td>
+            <td>Гроза+Шквал: слабый</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #ff58ff"></span>
+            </td>
+            <td>Гроза+Шквал: умеренный</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #c809ca"></span>
+            </td>
+            <td>Гроза+Шквал: сильный</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="palette-color" style="background: #2f3149"></span>
+            </td>
+            <td>Смерч</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="control-panel">
+      <h3>Таймлайн активного слоя</h3>
+      <div class="timeline-row">
+        <div class="step-btns">
+          <button class="step-btn" id="prevBtn" title="Предыдущий кадр">
+            &#9664;
+          </button>
+          <button class="play-btn" id="playBtn" title="Play/Pause">▶</button>
+          <button class="step-btn" id="nextBtn" title="Следующий кадр">
+            &#9654;
+          </button>
+          <button class="step-btn" id="measureBtn" title="Измерить расстояние">
+            📏
+          </button>
+          <button class="step-btn" id="drawBtn" title="Рисовать на карте">
+            ✏️
+          </button>
+        </div>
+        <input type="range" id="timeline" min="0" max="0" value="0" step="1" />
+        <span class="time-label" id="timeLabel">—</span>
+      </div>
+      <div class="playback-settings">
+        <span>Кадров в цикле:</span>
+        <select
+          id="playbackFrameCount"
+          title="Сколько последних кадров крутить"
+        >
+          <option value="6">6</option>
+          <option value="12">12</option>
+          <option value="18" selected>18</option>
+          <option value="all">Все</option>
+        </select>
+      </div>
+      <div class="status" id="status">Загрузка данных…</div>
+      <div class="status" id="precipInfo">Под курсором: —</div>
+    </div>
+    <div class="attribution">© 1x1 Радар ALPHA · DaGGeR</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/ol@10.6.1/dist/ol.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
