@@ -262,11 +262,16 @@
         padding: 4px 8px;
         outline: none;
       }
-      .source-panel {
+      .top-left-panels {
         position: absolute;
         top: 20px;
         left: 10px;
         z-index: 1100;
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+      }
+      .source-panel {
         background: rgba(255, 255, 255, 0.97);
         border: 1px solid #d0d7de;
         border-radius: 8px;
@@ -279,6 +284,41 @@
         display: flex;
         gap: 8px;
         align-items: center;
+      }
+      .satellite-style-panel {
+        background: rgba(255, 255, 255, 0.97);
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        padding: 10px 12px;
+        box-shadow:
+          0 4px 16px rgba(31, 35, 40, 0.1),
+          0 1px 3px rgba(31, 35, 40, 0.08);
+        font-size: 12px;
+        color: #57606a;
+        min-width: 280px;
+      }
+      .satellite-style-panel.hidden {
+        display: none;
+      }
+      .satellite-style-panel .panel-title {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 6px;
+        color: #57606a;
+        font-weight: 600;
+      }
+      .satellite-style-panel .toggle-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: #24292f;
+      }
+      .satellite-style-panel .hint {
+        margin-top: 6px;
+        font-size: 11px;
+        line-height: 1.35;
+        color: #6e7781;
       }
       .source-panel select {
         min-width: 260px;
@@ -300,15 +340,23 @@
           padding: 8px 10px;
           font-size: 10px;
         }
-        .source-panel {
+        .top-left-panels {
           top: 12px;
           left: 12px;
-          max-width: min(74vw, 360px);
+          max-width: min(92vw, 760px);
+          gap: 8px;
+        }
+        .source-panel {
           padding: 8px 10px;
         }
         .source-panel select {
           min-width: 0;
           max-width: 56vw;
+        }
+        .satellite-style-panel {
+          min-width: 0;
+          width: min(34vw, 320px);
+          padding: 8px 10px;
         }
         .control-panel {
           bottom: 12px;
@@ -395,13 +443,18 @@
           width: auto;
           max-height: 42vh;
         }
-        .source-panel {
+        .top-left-panels {
           left: 8px;
           right: 8px;
           top: calc(8px + env(safe-area-inset-top, 0px));
+          display: flex;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 8px;
+        }
+        .source-panel {
           width: auto;
           max-width: none;
-          gap: 6px;
           font-size: 11px;
           padding: 8px 10px;
         }
@@ -410,16 +463,41 @@
           width: 100%;
           max-width: none;
         }
+        .satellite-style-panel {
+          width: auto;
+          min-width: 0;
+          font-size: 11px;
+          padding: 8px 10px;
+        }
+        .satellite-style-panel .panel-title {
+          font-size: 10px;
+        }
+        .satellite-style-panel .hint {
+          font-size: 10px;
+        }
       }
     </style>
   </head>
   <body>
     <div id="map"></div>
-    <div class="source-panel">
-      <span>Слой:</span>
-      <select id="sourceLayerSelect" title="Активный слой осадков">
-        <option value="__hd__">Опасные явления HD</option>
-      </select>
+    <div class="top-left-panels">
+      <div class="source-panel">
+        <span>Слой:</span>
+        <select id="sourceLayerSelect" title="Активный слой осадков">
+          <option value="__hd__">Опасные явления HD</option>
+        </select>
+      </div>
+      <div class="satellite-style-panel hidden" id="satelliteStylePanel">
+        <div class="panel-title">Спутниковый стиль</div>
+        <label class="toggle-row">
+          <input type="checkbox" id="satelliteTempColor" checked />
+          <span>Цвет по радиационной температуре</span>
+        </label>
+        <div class="hint">
+          Отключите, чтобы показывать спутник в исходных оттенках без температурной
+          подсветки.
+        </div>
+      </div>
     </div>
 
     <div class="legend-panel" id="legendPanel">

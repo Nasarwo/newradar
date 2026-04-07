@@ -1,11 +1,15 @@
 const FRAME_FAST_INTERVAL_MS = 120;
 const FRAME_LAST_HOLD_MS = 2000;
+const SATELLITE_FRAME_FAST_INTERVAL_MS = 420;
+const SATELLITE_FRAME_LAST_HOLD_MS = 2400;
 const DATA_REFRESH_MS = 60_000;
 const NOWCAST_WMS_VERSION = "1.3.0";
 const SATELLITE_FRAME_LIMIT = 18;
 const SATELLITE_CADENCE_MIN = 10;
 const SOURCE_HD = "__hd__";
 const SOURCE_SATELLITE = "__satellite__";
+const SATELLITE_REFERENCE_TILE_URL =
+  "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}";
 const NOWCAST_LAYER_LABELS = {
   bufr_phenomena: "Опасные явления",
   bufr_height: "Высота ВГО",
@@ -46,6 +50,8 @@ const measureBtnEl = document.getElementById("measureBtn");
 const drawBtnEl = document.getElementById("drawBtn");
 const playbackFrameCountEl = document.getElementById("playbackFrameCount");
 const sourceLayerSelectEl = document.getElementById("sourceLayerSelect");
+const satelliteStylePanelEl = document.getElementById("satelliteStylePanel");
+const satelliteTempColorToggleEl = document.getElementById("satelliteTempColor");
 const legendPanelEl = document.getElementById("legendPanel");
 const legendToggleEl = document.getElementById("legendToggle");
 const precipInfoEl = document.getElementById("precipInfo");
@@ -54,6 +60,7 @@ let map;
 let frameLayer;
 let satelliteLayer;
 let radarLayer;
+let satelliteReferenceLayer;
 let measureLayer;
 let drawLayer;
 let frames = [];
@@ -104,6 +111,7 @@ const PHENOMENA_LEGEND = [
 const PHENOMENA_MATCH_MAX_DIST = 70;
 const SHOWER_MATCH_MAX_DIST = 130;
 const framePixelCache = new Map();
+const frameImageSizeCache = new Map();
 const frameStyledUrlCache = new Map();
 const RADAR_PIXEL_CUT_STYLE = false;
 const RADAR_PIXEL_CUT_STEP = 2;
@@ -131,6 +139,35 @@ const satelliteBlobUrlCache = new Map();
 const satelliteBlobUrlOrder = [];
 const satelliteTileStyleCache = new Map();
 const satelliteTileStyleOrder = [];
+let satelliteRadiationColorEnabled = true;
+
+function updateSatelliteStylePanelVisibility() {
+  if (!satelliteStylePanelEl) return;
+  satelliteStylePanelEl.classList.toggle(
+    "hidden",
+    activeSource !== SOURCE_SATELLITE,
+  );
+}
+
+function getSatelliteStyleCacheKey(sourceUrl) {
+  const mode = satelliteRadiationColorEnabled ? "cta" : "raw";
+  return `${mode}|${sourceUrl}`;
+}
+
+function clearSatelliteStyleCaches() {
+  for (const url of satelliteBlobUrlCache.values()) {
+    URL.revokeObjectURL(url);
+  }
+  satelliteBlobUrlCache.clear();
+  satelliteBlobUrlOrder.length = 0;
+
+  for (const url of satelliteTileStyleCache.values()) {
+    URL.revokeObjectURL(url);
+  }
+  satelliteTileStyleCache.clear();
+  satelliteTileStyleOrder.length = 0;
+  satelliteSourceCache.clear();
+}
 
 function getNearestLegendColorInfo(r, g, b) {
   let best = PHENOMENA_LEGEND[0];
@@ -181,34 +218,50 @@ function lerpColor(c1, c2, t) {
 }
 
 function pseudoBtCByLuma(luma) {
-  // Псевдо-шкала BT [-90..+50] для визуального CTA.
-  return -90 + clamp01(luma / 255) * 140;
+  // Псевдо-BT из яркости для визуальной CTA-шкалы (без физкалибровки).
+  const n = Math.pow(clamp01(luma / 255), 0.92);
+  return -90 + n * 140;
 }
 
-function ctaLikeRgbByColdNorm(coldNorm) {
-  // CTA-подсветка как у Meteologix: преимущественно cyan->blue для cold tops.
-  const t = clamp01(coldNorm);
-  if (t < 0.25) {
-    const k = t / 0.25;
-    return lerpColor([186, 236, 255], [132, 222, 255], k);
+const SATELLITE_CTA_STOPS = [
+  { t: -90, rgb: [38, 6, 34] },
+  { t: -82, rgb: [123, 12, 12] },
+  { t: -74, rgb: [209, 22, 12] },
+  { t: -66, rgb: [252, 87, 8] },
+  { t: -60, rgb: [255, 156, 16] },
+  { t: -56, rgb: [251, 212, 22] },
+  { t: -52, rgb: [201, 243, 63] },
+  { t: -48, rgb: [126, 236, 96] },
+  { t: -44, rgb: [52, 214, 180] },
+  { t: -40, rgb: [9, 160, 255] },
+  { t: -36, rgb: [10, 103, 255] },
+  { t: -32, rgb: [18, 54, 219] },
+  { t: -24, rgb: [128, 128, 128] },
+  { t: -12, rgb: [164, 164, 164] },
+  { t: 0, rgb: [198, 198, 198] },
+  { t: 12, rgb: [150, 150, 150] },
+  { t: 30, rgb: [88, 88, 88] },
+  { t: 50, rgb: [22, 22, 22] },
+];
+
+function ctaLikeRgbByBt(bt) {
+  if (bt <= SATELLITE_CTA_STOPS[0].t) return SATELLITE_CTA_STOPS[0].rgb;
+  const last = SATELLITE_CTA_STOPS[SATELLITE_CTA_STOPS.length - 1];
+  if (bt >= last.t) return last.rgb;
+  for (let i = 1; i < SATELLITE_CTA_STOPS.length; i++) {
+    const prev = SATELLITE_CTA_STOPS[i - 1];
+    const next = SATELLITE_CTA_STOPS[i];
+    if (bt > next.t) continue;
+    const k = clamp01((bt - prev.t) / (next.t - prev.t));
+    return lerpColor(prev.rgb, next.rgb, k);
   }
-  if (t < 0.50) {
-    const k = (t - 0.25) / 0.25;
-    return lerpColor([132, 222, 255], [74, 195, 255], k);
-  }
-  if (t < 0.72) {
-    const k = (t - 0.50) / 0.22;
-    return lerpColor([74, 195, 255], [26, 142, 252], k);
-  }
-  if (t < 0.90) {
-    const k = (t - 0.72) / 0.18;
-    return lerpColor([26, 142, 252], [8, 88, 232], k);
-  }
-  const k = (t - 0.90) / 0.10;
-  return lerpColor([8, 88, 232], [5, 40, 170], k);
+  return last.rgb;
 }
 
 async function styleSatelliteTileCTA(blob) {
+  if (!satelliteRadiationColorEnabled) {
+    return blob;
+  }
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (typeof createImageBitmap === "function") {
@@ -241,25 +294,12 @@ async function styleSatelliteTileCTA(blob) {
     const b = data[i + 2];
     const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     const bt = pseudoBtCByLuma(luma);
-    const gray = Math.round(luma);
-
-    // Красим только очень холодные tops (ближе к deep convection / overshooting tops).
-    // Всё теплее -52C оставляем нейтральным IR-фоном.
-    if (bt > -52) {
-      data[i] = gray;
-      data[i + 1] = gray;
-      data[i + 2] = gray;
-      data[i + 3] = Math.max(1, Math.round(a * 0.72));
-      continue;
-    }
-
-    // Нормируем холодный диапазон -52..-82C, чтобы не "раздувать" CTA-области.
-    const coldNorm = Math.pow(clamp01((-52 - bt) / 30), 1.2);
-    const [nr, ng, nb] = ctaLikeRgbByColdNorm(coldNorm);
+    const [nr, ng, nb] = ctaLikeRgbByBt(bt);
+    const coldNorm = Math.pow(clamp01((-35 - bt) / 45), 0.9);
     data[i] = nr;
     data[i + 1] = ng;
     data[i + 2] = nb;
-    data[i + 3] = Math.max(1, Math.round(a * (0.94 + 0.14 * coldNorm)));
+    data[i + 3] = Math.max(1, Math.round(a * (0.72 + 0.24 * coldNorm)));
   }
   ctx.putImageData(imageData, 0, 0);
   return await new Promise((resolve, reject) => {
@@ -347,10 +387,11 @@ function getSatelliteTileSource(urlTemplate) {
     crossOrigin: "anonymous",
     wrapX: false,
     tileSize: 256,
-    interpolate: false,
+    interpolate: true,
     tileLoadFunction: async (tile, src) => {
       const img = tile.getImage();
-      const cached = satelliteTileStyleCache.get(src);
+      const styleCacheKey = getSatelliteStyleCacheKey(src);
+      const cached = satelliteTileStyleCache.get(styleCacheKey);
       if (cached) {
         img.src = cached;
         return;
@@ -364,8 +405,8 @@ function getSatelliteTileSource(urlTemplate) {
         const blob = await response.blob();
         const styled = await styleSatelliteTileCTA(blob);
         const styledUrl = URL.createObjectURL(styled);
-        satelliteTileStyleCache.set(src, styledUrl);
-        satelliteTileStyleOrder.push(src);
+        satelliteTileStyleCache.set(styleCacheKey, styledUrl);
+        satelliteTileStyleOrder.push(styleCacheKey);
         while (satelliteTileStyleOrder.length > 800) {
           const oldKey = satelliteTileStyleOrder.shift();
           if (!oldKey) break;
@@ -446,9 +487,16 @@ async function tickPlayback(generation) {
 
   await renderFrame(nextIdx);
   if (!isPlaying || generation !== playbackGeneration) return;
-  const delay =
-    nextIdx === lastIdx ? FRAME_LAST_HOLD_MS : FRAME_FAST_INTERVAL_MS;
+  const delay = getPlaybackDelayMs(nextIdx, lastIdx);
   schedulePlayback(delay, generation);
+}
+
+function getPlaybackDelayMs(frameIdx, lastIdx) {
+  const isLast = frameIdx === lastIdx;
+  if (activeSource === SOURCE_SATELLITE) {
+    return isLast ? SATELLITE_FRAME_LAST_HOLD_MS : SATELLITE_FRAME_FAST_INTERVAL_MS;
+  }
+  return isLast ? FRAME_LAST_HOLD_MS : FRAME_FAST_INTERVAL_MS;
 }
 
 function formatDistanceKm(meters) {
@@ -579,10 +627,21 @@ function createMap() {
     visible: false,
     zIndex: 4,
   });
+  satelliteReferenceLayer = new ol.layer.Tile({
+    source: new ol.source.XYZ({
+      url: SATELLITE_REFERENCE_TILE_URL,
+      crossOrigin: "anonymous",
+      wrapX: true,
+      interpolate: true,
+    }),
+    opacity: 0.95,
+    visible: false,
+    zIndex: 6,
+  });
 
   map = new ol.Map({
     target: "map",
-    layers: [base, satelliteLayer, frameLayer],
+    layers: [base, satelliteLayer, frameLayer, satelliteReferenceLayer],
     view: new ol.View({
       projection,
       center: ol.proj.fromLonLat([
@@ -687,7 +746,7 @@ function createMap() {
 
 function renderNowcastPixelGapOverlay(event) {
   if (!NOWCAST_PIXEL_GAP_OVERLAY) return;
-  if (!map || activeSource === SOURCE_HD || activeSource === SOURCE_SATELLITE) return;
+  if (!map || activeSource === SOURCE_SATELLITE) return;
   const frame = frames[currentFrame];
   if (!frame || !Array.isArray(frame.imageExtent) || frame.imageExtent.length !== 4) return;
   const width = Number(frame.imageWidth || radarImageSize?.[0] || 0);
@@ -813,14 +872,14 @@ function upsertRadarLayer() {
   map.addLayer(radarLayer);
 }
 
-function setFrameExtentAndUrl(extent, url, projection) {
+function setFrameExtentAndUrl(extent, url, projection, interpolate = false) {
   frameLayer.setSource(
     new ol.source.ImageStatic({
       url: url || TRANSPARENT_PIXEL,
       projection: projection || "EPSG:4326",
       imageExtent: extent,
-      // Для радарной сетки используем nearest-neighbor, чтобы не замыливать пиксели.
-      interpolate: false,
+      // Для спутника включаем сглаживание, для радарной сетки оставляем пиксельный nearest.
+      interpolate,
     }),
   );
 }
@@ -893,6 +952,27 @@ async function getFramePixels(url) {
     framePixelCache.delete(first);
   }
   return payload;
+}
+
+async function getFrameImageSizeCached(url) {
+  if (!url) return { width: 0, height: 0 };
+  if (frameImageSizeCache.has(url)) return frameImageSizeCache.get(url);
+  const size = await new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () =>
+      resolve({
+        width: Number(image.naturalWidth || image.width || 0),
+        height: Number(image.naturalHeight || image.height || 0),
+      });
+    image.onerror = () => reject(new Error("Image size load failed"));
+    image.src = url;
+  });
+  frameImageSizeCache.set(url, size);
+  if (frameImageSizeCache.size > 64) {
+    const first = frameImageSizeCache.keys().next().value;
+    frameImageSizeCache.delete(first);
+  }
+  return size;
 }
 
 async function getStyledFrameUrl(url) {
@@ -1190,8 +1270,9 @@ async function getNowcastBlobUrlCached(sourceUrl) {
 }
 
 async function getSatelliteBlobUrlCached(sourceUrl) {
-  if (satelliteBlobUrlCache.has(sourceUrl)) {
-    return satelliteBlobUrlCache.get(sourceUrl);
+  const styleCacheKey = getSatelliteStyleCacheKey(sourceUrl);
+  if (satelliteBlobUrlCache.has(styleCacheKey)) {
+    return satelliteBlobUrlCache.get(styleCacheKey);
   }
   const response = await fetch(sourceUrl, { cache: "force-cache" });
   if (!response.ok) {
@@ -1200,8 +1281,8 @@ async function getSatelliteBlobUrlCached(sourceUrl) {
   const blob = await response.blob();
   const styledBlob = await styleSatelliteTileCTA(blob);
   const localUrl = URL.createObjectURL(styledBlob);
-  satelliteBlobUrlCache.set(sourceUrl, localUrl);
-  satelliteBlobUrlOrder.push(sourceUrl);
+  satelliteBlobUrlCache.set(styleCacheKey, localUrl);
+  satelliteBlobUrlOrder.push(styleCacheKey);
 
   const hardLimit = 180;
   while (satelliteBlobUrlOrder.length > hardLimit) {
@@ -1355,7 +1436,9 @@ async function switchSource(layerOrHd) {
     activeSource = SOURCE_SATELLITE;
     frameLayer?.setVisible(true);
     satelliteLayer?.setVisible(false);
+    satelliteReferenceLayer?.setVisible(true);
     frameLayer?.setOpacity(1);
+    updateSatelliteStylePanelVisibility();
     setPlaybackControlsEnabled(true);
     frames = satelliteFrames.slice();
     currentFrame = Math.max(0, frames.length - 1);
@@ -1373,7 +1456,9 @@ async function switchSource(layerOrHd) {
     activeSource = SOURCE_HD;
     frameLayer?.setVisible(true);
     satelliteLayer?.setVisible(false);
+    satelliteReferenceLayer?.setVisible(false);
     frameLayer?.setOpacity(HD_LAYER_OPACITY);
+    updateSatelliteStylePanelVisibility();
     setPlaybackControlsEnabled(true);
     frames = hdFrames.slice();
     timelineEl.max = String(Math.max(0, frames.length - 1));
@@ -1392,7 +1477,9 @@ async function switchSource(layerOrHd) {
   activeSource = next;
   frameLayer?.setVisible(true);
   satelliteLayer?.setVisible(false);
+  satelliteReferenceLayer?.setVisible(false);
   frameLayer?.setOpacity(NOWCAST_LAYER_OPACITY);
+  updateSatelliteStylePanelVisibility();
   setPlaybackControlsEnabled(true);
   frames = nowcastFrames.slice();
   currentFrame = Math.max(0, frames.length - 1);
@@ -1413,6 +1500,7 @@ async function renderFrame(index) {
     satelliteLayer?.setSource(source);
     frameLayer?.setVisible(false);
     satelliteLayer?.setVisible(true);
+    satelliteReferenceLayer?.setVisible(activeSource === SOURCE_SATELLITE);
     timelineEl.value = String(currentFrame);
     timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
     const layerLabel = getSourceDisplayName(activeSource);
@@ -1428,6 +1516,20 @@ async function renderFrame(index) {
         : geoBounds;
   let displayUrl = frame.url;
   if (frame?.url) {
+    if (
+      (!Number.isFinite(Number(frame.imageWidth)) || Number(frame.imageWidth) <= 1) ||
+      (!Number.isFinite(Number(frame.imageHeight)) || Number(frame.imageHeight) <= 1)
+    ) {
+      try {
+        const size = await getFrameImageSizeCached(frame.url);
+        if (size.width > 1 && size.height > 1) {
+          frame.imageWidth = size.width;
+          frame.imageHeight = size.height;
+        }
+      } catch (e) {
+        console.warn("Frame size probe failed, fallback to payload size:", e);
+      }
+    }
     try {
       displayUrl = await getStyledFrameUrl(frame.url);
     } catch (e) {
@@ -1438,7 +1540,13 @@ async function renderFrame(index) {
   if (renderToken !== frameRenderToken) return;
   satelliteLayer?.setVisible(false);
   frameLayer?.setVisible(true);
-  setFrameExtentAndUrl(extent, displayUrl, projection);
+  satelliteReferenceLayer?.setVisible(activeSource === SOURCE_SATELLITE);
+  setFrameExtentAndUrl(
+    extent,
+    displayUrl,
+    projection,
+    activeSource === SOURCE_SATELLITE,
+  );
   timelineEl.value = String(currentFrame);
   timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
   const layerLabel = getSourceDisplayName(activeSource);
@@ -1469,7 +1577,8 @@ function startPlayback() {
       console.warn("Playback start render failed:", e);
     });
   }
-  schedulePlayback(FRAME_FAST_INTERVAL_MS, generation);
+  const lastIdx = frames.length - 1;
+  schedulePlayback(getPlaybackDelayMs(currentFrame, lastIdx), generation);
   updatePlayButton();
 }
 
@@ -1526,6 +1635,21 @@ function bindControls() {
     } catch (e) {
       console.warn("Source switch failed:", e);
       setStatus(`Ошибка переключения слоя: ${e.message}`);
+    }
+  });
+  satelliteTempColorToggleEl?.addEventListener("change", async () => {
+    const enabled = Boolean(satelliteTempColorToggleEl.checked);
+    if (enabled === satelliteRadiationColorEnabled) return;
+    satelliteRadiationColorEnabled = enabled;
+    clearSatelliteStyleCaches();
+    if (activeSource !== SOURCE_SATELLITE) return;
+    satelliteLayer?.setSource(null);
+    setStatus("Применение спутникового стиля...");
+    try {
+      await switchSource(SOURCE_SATELLITE);
+    } catch (e) {
+      console.warn("Satellite style toggle failed:", e);
+      setStatus(`Ошибка стиля спутника: ${e.message}`);
     }
   });
 }
@@ -1609,6 +1733,7 @@ async function init() {
     } catch (e) {
       console.warn("Nowcast meta load failed:", e);
     }
+    updateSatelliteStylePanelVisibility();
     setStatus(`Готово. Радаров: ${radars.length}`);
 
     timelineEl.min = "0";
