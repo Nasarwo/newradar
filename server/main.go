@@ -63,7 +63,17 @@ const (
 	eumetTokenURLAlt   = "https://api.eumetsat.int/token"
 	eumetDefaultLayer  = "msg_fes:ir108"
 	satelliteCacheDir  = "../cache/satellite"
+	syncFrameLimit     = 18
+	syncRequestTimeout = 95 * time.Second
+	meteoFrameWindow   = 19
 )
+
+var nowcastSyncLayers = []string{
+	"bufr_phenomena",
+	"bufr_height",
+	"bufr_dbz1",
+	"bufr_precip",
+}
 
 // Georeference control points (lat, lon) -> (pixel x, y)
 // Moscow: [55.7558, 37.6173] -> [502, 381]
@@ -265,14 +275,17 @@ func main() {
 			log.Printf("Using manual radar centers: %d (file: %s)", len(manual), manualRadarsFile)
 		}
 	}
+	initStateFromExistingFrames()
 	// Initial fetch
 	go fetchAndProcess()
+	go syncExternalSources("startup")
 
 	// Periodic fetch
 	ticker := time.NewTicker(refreshPeriod)
 	go func() {
 		for range ticker.C {
 			fetchAndProcess()
+			syncExternalSources("periodic")
 		}
 	}()
 
@@ -299,6 +312,85 @@ func main() {
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func initStateFromExistingFrames() {
+	existing := scanFrames()
+	if len(existing) == 0 {
+		log.Printf("[startup] local frames: none")
+		return
+	}
+
+	w, h := detectFrameImageSize(existing[0].URL)
+	digest, hasDigest := computeFrameDigestByURL(existing[len(existing)-1].URL)
+
+	state.mu.Lock()
+	state.frames = existing
+	state.initialLoadDone = true
+	state.lastUpdate = time.Now()
+	if w > 0 && h > 0 {
+		state.imageSize = [2]int{w, h}
+	}
+	if hasDigest {
+		state.lastFrameDigest = digest
+		state.hasLastFrameHash = true
+	}
+	state.mu.Unlock()
+
+	log.Printf(
+		"[startup] local frames restored: count=%d image=%dx%d digest=%t",
+		len(existing),
+		w,
+		h,
+		hasDigest,
+	)
+}
+
+func detectFrameImageSize(frameURL string) (int, int) {
+	path := frameURLToPath(frameURL)
+	if strings.TrimSpace(path) == "" {
+		return 0, 0
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0
+	}
+	defer f.Close()
+	cfg, err := png.DecodeConfig(f)
+	if err != nil {
+		return 0, 0
+	}
+	return cfg.Width, cfg.Height
+}
+
+func computeFrameDigestByURL(frameURL string) (uint64, bool) {
+	path := frameURLToPath(frameURL)
+	if strings.TrimSpace(path) == "" {
+		return 0, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		return 0, false
+	}
+	b := img.Bounds()
+	rgba := image.NewRGBA(b)
+	draw.Draw(rgba, b, img, b.Min, draw.Src)
+	return hashRGBA(rgba), true
+}
+
+func frameURLToPath(frameURL string) string {
+	if strings.HasPrefix(frameURL, "/frames_warped/") {
+		return filepath.Join(warpedDir, strings.TrimPrefix(frameURL, "/frames_warped/"))
+	}
+	if strings.HasPrefix(frameURL, "/frames/") {
+		return filepath.Join(framesDir, strings.TrimPrefix(frameURL, "/frames/"))
+	}
+	return ""
 }
 
 func loadDotEnvIntoProcess(candidates []string) {
@@ -1024,6 +1116,177 @@ func handleSatelliteImageProxy(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[satellite/image] done: status=200 content-type=%q bytes=%d elapsed=%s", contentType, len(body), time.Since(started).Round(time.Millisecond))
 }
 
+func syncExternalSources(reason string) {
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), syncRequestTimeout)
+	defer cancel()
+	log.Printf("[sync] start: reason=%s window=%d", reason, syncFrameLimit)
+
+	if err := syncNowcastFrames(ctx); err != nil {
+		log.Printf("[sync] nowcast error: %v", err)
+	}
+	if err := syncSatelliteFrames(ctx); err != nil {
+		log.Printf("[sync] satellite error: %v", err)
+	}
+	log.Printf("[sync] done: reason=%s elapsed=%s", reason, time.Since(started).Round(time.Millisecond))
+}
+
+func syncNowcastFrames(ctx context.Context) error {
+	capXML, err := getNowcastCapabilitiesCached(ctx)
+	if err != nil {
+		return fmt.Errorf("capabilities: %w", err)
+	}
+	layerTimes, _, _, err := parseNowcastCapabilities(capXML)
+	if err != nil {
+		return fmt.Errorf("capabilities parse: %w", err)
+	}
+
+	state.mu.RLock()
+	defaultBounds := state.geoBounds
+	defaultSize := state.imageSize
+	state.mu.RUnlock()
+	west, south, east, north := defaultBounds[0], defaultBounds[1], defaultBounds[2], defaultBounds[3]
+	width := max(1, defaultSize[0])
+	height := max(1, defaultSize[1])
+	if width <= 1 {
+		width = 1024
+	}
+	if height <= 1 {
+		height = 768
+	}
+
+	crs := "EPSG:3857"
+	version := "1.3.0"
+	minX, minY := lonLatToWebMercator(west, south)
+	maxX, maxY := lonLatToWebMercator(east, north)
+	bbox := fmt.Sprintf("%.3f,%.3f,%.3f,%.3f", minX, minY, maxX, maxY)
+
+	keep := map[string]struct{}{
+		"REQUEST=GetCapabilities&SERVICE=WMS&VERSION=1.3.0": {},
+	}
+	fetched := 0
+	for _, layer := range nowcastSyncLayers {
+		times := intersectLayerTimes(layer, layerTimes)
+		if len(times) == 0 {
+			continue
+		}
+		if len(times) > syncFrameLimit {
+			times = times[len(times)-syncFrameLimit:]
+		}
+		for _, t := range times {
+			values := url.Values{}
+			values.Set("SERVICE", "WMS")
+			values.Set("VERSION", version)
+			values.Set("REQUEST", "GetMap")
+			values.Set("FORMAT", "image/png")
+			values.Set("TRANSPARENT", "TRUE")
+			values.Set("LAYERS", layer)
+			values.Set("TIME", t)
+			values.Set("WIDTH", strconv.Itoa(width))
+			values.Set("HEIGHT", strconv.Itoa(height))
+			values.Set("CRS", crs)
+			values.Set("SRS", crs)
+			values.Set("BBOX", bbox)
+			canonical := canonicalNowcastQuery(values)
+			keep[canonical] = struct{}{}
+
+			if _, _, ok := readNowcastCache(canonical, 0); ok {
+				continue
+			}
+			if _, _, _, err := fetchNowcastAndMaybeCache(ctx, canonical, "getmap", true); err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err
+				}
+				log.Printf("[sync/nowcast] prefetch warning layer=%s time=%s: %v", layer, t, err)
+				continue
+			}
+			fetched++
+		}
+	}
+	pruned, err := pruneNowcastCacheExcept(keep)
+	if err != nil {
+		return err
+	}
+	log.Printf("[sync/nowcast] done: keep=%d fetched=%d pruned=%d", len(keep), fetched, pruned)
+	return nil
+}
+
+func syncSatelliteFrames(ctx context.Context) error {
+	requestedLayer := "auto"
+	token, err := getEUMETViewAccessToken(ctx)
+	authMode := "token"
+	if err != nil {
+		token = ""
+		authMode = "public"
+	}
+	_, capXML, err := getEUMETCapabilitiesWithFallback(ctx, token)
+	if err != nil {
+		return fmt.Errorf("capabilities: %w", err)
+	}
+	layerTimes, layerTitles, _, err := parseNowcastCapabilities(capXML)
+	if err != nil {
+		return fmt.Errorf("capabilities parse: %w", err)
+	}
+	layer, _, err := resolveEUMETLayer(requestedLayer, layerTimes, layerTitles)
+	if err != nil {
+		return fmt.Errorf("resolve layer: %w", err)
+	}
+	times := intersectLayerTimes(layer, layerTimes)
+	if len(times) == 0 {
+		return fmt.Errorf("no times for layer %s", layer)
+	}
+	picked, err := pickSatelliteTimes(times, syncFrameLimit, time.Duration(frameIntervalMin)*time.Minute)
+	if err != nil {
+		return fmt.Errorf("pick times: %w", err)
+	}
+	if len(picked) == 0 {
+		return fmt.Errorf("empty picked times")
+	}
+
+	state.mu.RLock()
+	defaultBounds := state.geoBounds
+	state.mu.RUnlock()
+	west, south, east, north := defaultBounds[0], defaultBounds[1], defaultBounds[2], defaultBounds[3]
+	if !NumberIsFinite(west) || !NumberIsFinite(south) || !NumberIsFinite(east) || !NumberIsFinite(north) || east <= west || north <= south {
+		west, south, east, north = -180, -90, 180, 90
+	}
+	width, height := defaultSatelliteImageSize(west, south, east, north)
+	bounds := [4]float64{west, south, east, north}
+
+	keep := make(map[string]struct{}, len(picked))
+	fetched := 0
+	sourceID := "token"
+	if strings.TrimSpace(token) == "" {
+		sourceID = "public"
+	}
+	for _, tStr := range picked {
+		base, _, _, status, err := fetchSatelliteImageWithFallback(ctx, token, layer, tStr, bounds, width, height, true)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			log.Printf("[sync/satellite] prefetch warning layer=%s time=%s: %v", layer, tStr, err)
+			continue
+		}
+		if status != http.StatusOK {
+			log.Printf("[sync/satellite] upstream non-200 layer=%s time=%s status=%d", layer, tStr, status)
+			continue
+		}
+		cacheKey := satelliteImageCanonicalCacheKey(base, sourceID, layer, tStr, bounds, width, height)
+		keep["img:"+cacheKey] = struct{}{}
+		fetched++
+	}
+	pruned, err := pruneSatelliteImageCacheExcept(keep)
+	if err != nil {
+		return err
+	}
+	log.Printf(
+		"[sync/satellite] done: auth=%s layer=%s keep=%d fetched=%d pruned=%d",
+		authMode, layer, len(keep), fetched, pruned,
+	)
+	return nil
+}
+
 func satelliteImageCacheMaxAge(timeStr string) time.Duration {
 	if strings.TrimSpace(timeStr) == "" {
 		return 8 * time.Minute
@@ -1489,30 +1752,64 @@ func satelliteCacheFileBase(key string) string {
 	return filepath.Join(satelliteCacheDir, fmt.Sprintf("%x", sum[:]))
 }
 
+type cacheEntryMeta struct {
+	Base        string
+	Key         string
+	ContentType string
+	CreatedUnix int64
+}
+
+func readCacheEntryMeta(metaPath string) (cacheEntryMeta, bool) {
+	raw, err := os.ReadFile(metaPath)
+	if err != nil {
+		return cacheEntryMeta{}, false
+	}
+	lines := strings.Split(string(raw), "\n")
+	if len(lines) < 2 {
+		return cacheEntryMeta{}, false
+	}
+	tUnix, err := strconv.ParseInt(strings.TrimSpace(lines[0]), 10, 64)
+	if err != nil {
+		return cacheEntryMeta{}, false
+	}
+	contentType := strings.TrimSpace(lines[1])
+	key := ""
+	if len(lines) >= 3 {
+		key = strings.TrimSpace(lines[2])
+	}
+	base := strings.TrimSuffix(metaPath, ".meta")
+	return cacheEntryMeta{
+		Base:        base,
+		Key:         key,
+		ContentType: contentType,
+		CreatedUnix: tUnix,
+	}, true
+}
+
+func removeCacheEntryByBase(base string) {
+	if strings.TrimSpace(base) == "" {
+		return
+	}
+	_ = os.Remove(base + ".meta")
+	_ = os.Remove(base + ".bin")
+}
+
 func readSatelliteCache(key string, maxAge time.Duration) ([]byte, string, bool) {
 	base := satelliteCacheFileBase(key)
 	metaPath := base + ".meta"
 	bodyPath := base + ".bin"
-	metaRaw, err := os.ReadFile(metaPath)
-	if err != nil {
+	meta, ok := readCacheEntryMeta(metaPath)
+	if !ok {
 		return nil, "", false
 	}
-	parts := strings.SplitN(string(metaRaw), "\n", 2)
-	if len(parts) < 2 {
-		return nil, "", false
-	}
-	tUnix, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
-	if err != nil {
-		return nil, "", false
-	}
-	if maxAge > 0 && time.Since(time.Unix(tUnix, 0)) > maxAge {
+	if maxAge > 0 && time.Since(time.Unix(meta.CreatedUnix, 0)) > maxAge {
 		return nil, "", false
 	}
 	body, err := os.ReadFile(bodyPath)
 	if err != nil {
 		return nil, "", false
 	}
-	contentType := strings.TrimSpace(parts[1])
+	contentType := meta.ContentType
 	if contentType == "" {
 		contentType = http.DetectContentType(body)
 	}
@@ -1524,8 +1821,73 @@ func writeSatelliteCache(key string, contentType string, body []byte) {
 	metaPath := base + ".meta"
 	bodyPath := base + ".bin"
 	_ = os.WriteFile(bodyPath, body, 0644)
-	meta := fmt.Sprintf("%d\n%s", time.Now().Unix(), strings.TrimSpace(contentType))
+	meta := fmt.Sprintf("%d\n%s\n%s", time.Now().Unix(), strings.TrimSpace(contentType), strings.TrimSpace(key))
 	_ = os.WriteFile(metaPath, []byte(meta), 0644)
+}
+
+func satelliteImageCanonicalCacheKey(
+	wmsBase string,
+	sourceID string,
+	layer string,
+	timeStr string,
+	bounds [4]float64,
+	width int,
+	height int,
+) string {
+	west, south, east, north := bounds[0], bounds[1], bounds[2], bounds[3]
+	bbox := fmt.Sprintf("%.6f,%.6f,%.6f,%.6f", west, south, east, north)
+	values := url.Values{}
+	values.Set("SERVICE", "WMS")
+	values.Set("VERSION", "1.3.0")
+	values.Set("REQUEST", "GetMap")
+	values.Set("LAYERS", layer)
+	values.Set("STYLES", "")
+	values.Set("FORMAT", "image/png")
+	values.Set("TRANSPARENT", "TRUE")
+	values.Set("CRS", "CRS:84")
+	values.Set("SRS", "CRS:84")
+	values.Set("BBOX", bbox)
+	values.Set("WIDTH", strconv.Itoa(width))
+	values.Set("HEIGHT", strconv.Itoa(height))
+	values.Set("TIME", timeStr)
+	return sourceID + "|" + strings.TrimSpace(wmsBase) + "|" + canonicalNowcastQuery(values)
+}
+
+func pruneSatelliteImageCacheExcept(keep map[string]struct{}) (int, error) {
+	entries, err := os.ReadDir(satelliteCacheDir)
+	if err != nil {
+		return 0, err
+	}
+	pruned := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".meta") {
+			continue
+		}
+		metaPath := filepath.Join(satelliteCacheDir, e.Name())
+		meta, ok := readCacheEntryMeta(metaPath)
+		if !ok {
+			removeCacheEntryByBase(strings.TrimSuffix(metaPath, ".meta"))
+			pruned++
+			continue
+		}
+		key := strings.TrimSpace(meta.Key)
+		// Старый формат мета без ключа считаем устаревшим.
+		if key == "" {
+			removeCacheEntryByBase(meta.Base)
+			pruned++
+			continue
+		}
+		// Чистим только img-кэш, capabilities/прочее оставляем.
+		if !strings.HasPrefix(key, "img:") {
+			continue
+		}
+		if _, ok := keep[key]; ok {
+			continue
+		}
+		removeCacheEntryByBase(meta.Base)
+		pruned++
+	}
+	return pruned, nil
 }
 
 func lonLatToWebMercator(lon, lat float64) (float64, float64) {
@@ -1901,27 +2263,19 @@ func readNowcastCache(query string, maxAge time.Duration) ([]byte, string, bool)
 	base := nowcastCacheFileBase(query)
 	metaPath := base + ".meta"
 	bodyPath := base + ".bin"
-	metaRaw, err := os.ReadFile(metaPath)
-	if err != nil {
-		return nil, "", false
-	}
-	parts := strings.SplitN(string(metaRaw), "\n", 2)
-	if len(parts) < 2 {
-		return nil, "", false
-	}
-	tUnix, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
-	if err != nil {
+	meta, ok := readCacheEntryMeta(metaPath)
+	if !ok {
 		return nil, "", false
 	}
 	// maxAge <= 0 => бессрочный кэш (без проверки возраста).
-	if maxAge > 0 && time.Since(time.Unix(tUnix, 0)) > maxAge {
+	if maxAge > 0 && time.Since(time.Unix(meta.CreatedUnix, 0)) > maxAge {
 		return nil, "", false
 	}
 	body, err := os.ReadFile(bodyPath)
 	if err != nil {
 		return nil, "", false
 	}
-	contentType := strings.TrimSpace(parts[1])
+	contentType := meta.ContentType
 	if contentType == "" {
 		contentType = http.DetectContentType(body)
 	}
@@ -1933,8 +2287,40 @@ func writeNowcastCache(query string, contentType string, body []byte) {
 	metaPath := base + ".meta"
 	bodyPath := base + ".bin"
 	_ = os.WriteFile(bodyPath, body, 0644)
-	meta := fmt.Sprintf("%d\n%s", time.Now().Unix(), strings.TrimSpace(contentType))
+	meta := fmt.Sprintf("%d\n%s\n%s", time.Now().Unix(), strings.TrimSpace(contentType), strings.TrimSpace(query))
 	_ = os.WriteFile(metaPath, []byte(meta), 0644)
+}
+
+func pruneNowcastCacheExcept(keep map[string]struct{}) (int, error) {
+	entries, err := os.ReadDir(nowcastCacheDir)
+	if err != nil {
+		return 0, err
+	}
+	pruned := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".meta") {
+			continue
+		}
+		metaPath := filepath.Join(nowcastCacheDir, e.Name())
+		meta, ok := readCacheEntryMeta(metaPath)
+		if !ok {
+			removeCacheEntryByBase(strings.TrimSuffix(metaPath, ".meta"))
+			pruned++
+			continue
+		}
+		key := strings.TrimSpace(meta.Key)
+		if key == "" {
+			removeCacheEntryByBase(meta.Base)
+			pruned++
+			continue
+		}
+		if _, ok := keep[key]; ok {
+			continue
+		}
+		removeCacheEntryByBase(meta.Base)
+		pruned++
+	}
+	return pruned, nil
 }
 
 func fetchAndProcess() {
@@ -2638,6 +3024,7 @@ const (
 	cleanHistorySatMerge = 20    // merge pixel into cleanHistory if saturation above this
 	debugCityRed         = false // set true: paint city zones bright red to verify mask
 	lightningDilatePx    = 2     // more aggressive: remove full plus + antialias halo
+	keepLightningPluses  = true  // for HD layer: keep '+' glyphs, do not remove/infill them
 )
 
 var phenomenaPalette = [...]color.RGBA{
@@ -3452,7 +3839,9 @@ func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Im
 		if i+1 < len(composed) {
 			next = composed[i+1]
 		}
-		lightningMasks[i] = detectLightningGlyphMask(composed[i], prev, next, bounds)
+		if !keepLightningPluses {
+			lightningMasks[i] = detectLightningGlyphMask(composed[i], prev, next, bounds)
+		}
 		baseFrames[i] = subtractReference(composed[i], ref, mask, nil, bounds, nil, nil, nil, nil, nil, nil, nil, nil)
 	}
 	log.Printf("[process:%s] stage base done: frames=%d elapsed=%s", batchID, len(baseFrames), time.Since(stageBaseStart).Round(time.Millisecond))
@@ -3593,6 +3982,10 @@ func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Im
 		time.Since(saveWarpStart).Round(time.Millisecond),
 	)
 
+	trimmed := enforceMeteoFrameWindow(meteoFrameWindow)
+	if trimmed > 0 {
+		log.Printf("[process:%s] trimmed oldest meteo frames: %d", batchID, trimmed)
+	}
 	cleanupOldFrames()
 	scanned := scanFrames()
 	log.Printf("[process:%s] done: indexed_frames=%d total_elapsed=%s", batchID, len(scanned), time.Since(started).Round(time.Millisecond))
@@ -3605,6 +3998,59 @@ func cleanupOldFrames() {
 	if thinSplineEnabled {
 		cleanupDirByCutoff(warpedDir, cutoff, true)
 	}
+}
+
+func enforceMeteoFrameWindow(limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	trimRaw := trimOldestFrameFiles(framesDir, limit)
+	trimWarp := 0
+	if thinSplineEnabled {
+		trimWarp = trimOldestFrameFiles(warpedDir, limit)
+	}
+	return trimRaw + trimWarp
+}
+
+func trimOldestFrameFiles(dir string, limit int) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	type item struct {
+		path string
+		mod  time.Time
+	}
+	list := make([]item, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".png") {
+			continue
+		}
+		if e.Name() == warpedMaskFileName {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		list = append(list, item{path: path, mod: info.ModTime()})
+	}
+	if len(list) <= limit {
+		return 0
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].mod.Before(list[j].mod) })
+	removeCount := len(list) - limit
+	removed := 0
+	for i := 0; i < removeCount; i++ {
+		path := list[i].path
+		if err := os.Remove(path); err != nil {
+			continue
+		}
+		_ = os.Remove(strings.TrimSuffix(path, ".png") + ".json")
+		removed++
+	}
+	return removed
 }
 
 func cleanupDirByCutoff(dir string, cutoff time.Time, removeJSON bool) {

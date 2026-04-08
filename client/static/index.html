@@ -40,6 +40,9 @@
         pointer-events: none;
         z-index: 900;
       }
+      .map-crosshair.hidden {
+        display: none;
+      }
       .map-crosshair::before,
       .map-crosshair::after {
         content: "";
@@ -60,6 +63,27 @@
         width: 24px;
         height: 1px;
         transform: translateY(-50%);
+      }
+      .crosshair-info {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, calc(-100% - 18px));
+        z-index: 901;
+        pointer-events: none;
+        background: rgba(255, 255, 255, 0.96);
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        padding: 5px 9px;
+        font-size: 12px;
+        color: #1f2328;
+        box-shadow:
+          0 2px 8px rgba(31, 35, 40, 0.14),
+          0 1px 2px rgba(31, 35, 40, 0.1);
+        white-space: nowrap;
+      }
+      .crosshair-info.hidden {
+        display: none;
       }
       .ol-viewport {
         background: #f6f8fa !important;
@@ -511,7 +535,8 @@
   </head>
   <body>
     <div id="map"></div>
-    <div class="map-crosshair" aria-hidden="true"></div>
+    <div class="map-crosshair hidden" id="mapCrosshair" aria-hidden="true"></div>
+    <div class="crosshair-info hidden" id="crosshairInfo">В перекрестии: —</div>
     <div class="top-left-panels">
       <div class="source-panel">
         <span>Слой:</span>
@@ -565,6 +590,9 @@
           <button class="step-btn" id="drawBtn" title="Рисовать на карте">
             ✏️
           </button>
+          <button class="step-btn" id="crosshairBtn" title="Перекрестье в центре">
+            ✛
+          </button>
         </div>
         <input type="range" id="timeline" min="0" max="0" value="0" step="1" />
         <span class="time-label" id="timeLabel">—</span>
@@ -582,7 +610,6 @@
         </select>
       </div>
       <div class="status" id="status">Загрузка данных…</div>
-      <div class="status" id="precipInfo">В перекрестии: —</div>
     </div>
     <div class="attribution">© 1x1 Радар ALPHA · DaGGeR</div>
 

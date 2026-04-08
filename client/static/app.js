@@ -48,6 +48,7 @@ const prevBtnEl = document.getElementById("prevBtn");
 const nextBtnEl = document.getElementById("nextBtn");
 const measureBtnEl = document.getElementById("measureBtn");
 const drawBtnEl = document.getElementById("drawBtn");
+const crosshairBtnEl = document.getElementById("crosshairBtn");
 const playbackFrameCountEl = document.getElementById("playbackFrameCount");
 const sourceLayerSelectEl = document.getElementById("sourceLayerSelect");
 const satelliteStylePanelEl = document.getElementById("satelliteStylePanel");
@@ -56,7 +57,8 @@ const legendPanelEl = document.getElementById("legendPanel");
 const legendToggleEl = document.getElementById("legendToggle");
 const legendTitleTextEl = document.getElementById("legendTitleText");
 const legendRowsEl = document.getElementById("legendRows");
-const precipInfoEl = document.getElementById("precipInfo");
+const mapCrosshairEl = document.getElementById("mapCrosshair");
+const crosshairInfoEl = document.getElementById("crosshairInfo");
 
 let map;
 let baseLayer;
@@ -83,6 +85,7 @@ let playbackGeneration = 0;
 let dataRefreshTimer = null;
 let measureMode = false;
 let drawMode = false;
+let crosshairMode = false;
 let measureStart = null;
 let measureEnd = null;
 let measurePointer = null;
@@ -173,9 +176,9 @@ const PRECIP_LEGEND = [
 const LEGEND_CONFIG_BY_SOURCE = {
   [SOURCE_HD]: { title: "Опасные явления HD", items: PHENOMENA_LEGEND, maxDist: 70 },
   bufr_phenomena: { title: "Опасные явления", items: PHENOMENA_LEGEND, maxDist: 70 },
-  bufr_height: { title: "Высота ВГО", items: HEIGHT_LEGEND, maxDist: 56 },
-  bufr_dbz1: { title: "Отражаемость (dBZ)", items: DBZ_LEGEND, maxDist: 56 },
-  bufr_precip: { title: "Интенсивность", items: PRECIP_LEGEND, maxDist: 56 },
+  bufr_height: { title: "Высота ВГО", items: HEIGHT_LEGEND, maxDist: 70, forceNearest: true },
+  bufr_dbz1: { title: "Отражаемость (dBZ)", items: DBZ_LEGEND, maxDist: 70, forceNearest: true },
+  bufr_precip: { title: "Интенсивность", items: PRECIP_LEGEND, maxDist: 70, forceNearest: true },
 };
 const PHENOMENA_MATCH_MAX_DIST = 70;
 const SHOWER_MATCH_MAX_DIST = 130;
@@ -264,7 +267,17 @@ function setStatus(text) {
 }
 
 function setPrecipInfo(text) {
-  if (precipInfoEl) precipInfoEl.textContent = text;
+  if (crosshairInfoEl) crosshairInfoEl.textContent = text;
+}
+
+function setCrosshairMode(enabled) {
+  crosshairMode = Boolean(enabled);
+  if (crosshairBtnEl) crosshairBtnEl.classList.toggle("active", crosshairMode);
+  if (mapCrosshairEl) mapCrosshairEl.classList.toggle("hidden", !crosshairMode);
+  if (crosshairInfoEl) crosshairInfoEl.classList.toggle("hidden", !crosshairMode);
+  if (crosshairMode) {
+    inspectPrecipAtCrosshairCenter().catch(() => {});
+  }
 }
 
 function getSourceDisplayName(sourceKey) {
@@ -1001,6 +1014,9 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
   const items = cfg?.items || [];
   if (!items.length) return null;
   if (alpha === 0) return items[0].label;
+  if ((sourceKey === "bufr_height" || sourceKey === "bufr_dbz1" || sourceKey === "bufr_precip") && alpha < 24) {
+    return items[0].label;
+  }
 
   let best = items[0];
   let bestDist = Infinity;
@@ -1015,6 +1031,7 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
     }
   }
   if (bestDist <= (cfg?.maxDist || PHENOMENA_MATCH_MAX_DIST)) return best.label;
+  if (cfg?.forceNearest) return best.label;
 
   // Для "Опасных явлений" оставляем чуть более мягкий fallback на синие ливневые тона.
   if (sourceKey === SOURCE_HD || sourceKey === "bufr_phenomena") {
@@ -1142,6 +1159,7 @@ async function getStyledFrameUrl(url) {
 }
 
 async function inspectPrecipAtCrosshairCenter() {
+  if (!crosshairMode) return;
   if (!map || !frames.length) return;
   if (activeSource === SOURCE_SATELLITE) {
     setPrecipInfo("В перекрестии: спутниковый слой");
@@ -1750,6 +1768,9 @@ function bindControls() {
     setDrawMode(!drawMode);
     if (drawMode) setMeasureMode(false);
   });
+  crosshairBtnEl?.addEventListener("click", () => {
+    setCrosshairMode(!crosshairMode);
+  });
   legendToggleEl?.addEventListener("click", () => {
     legendPanelEl?.classList.toggle("legend-collapsed");
   });
@@ -1869,6 +1890,7 @@ async function init() {
     frames = hdFrames.slice();
     createMap();
     bindControls();
+    setCrosshairMode(false);
     renderActiveLegend();
     upsertRadarLayer();
     try {
@@ -1884,7 +1906,6 @@ async function init() {
     timelineEl.max = String(Math.max(0, frames.length - 1));
     timelineEl.value = "0";
     await renderFrame(0);
-    await inspectPrecipAtCrosshairCenter();
     if (frames.length > 1) startPlayback();
     else updatePlayButton();
     dataRefreshTimer = setInterval(refreshData, DATA_REFRESH_MS);
