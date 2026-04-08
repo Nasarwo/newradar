@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Радар осадков | Росгидромет</title>
+    <title>MetloRad (BETA)</title>
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/ol@10.6.1/ol.css"
@@ -30,6 +30,37 @@
         bottom: 0;
         z-index: 1;
       }
+      .map-crosshair {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 28px;
+        height: 28px;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+        z-index: 900;
+      }
+      .map-crosshair::before,
+      .map-crosshair::after {
+        content: "";
+        position: absolute;
+        background: rgba(31, 35, 40, 0.85);
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.75);
+      }
+      .map-crosshair::before {
+        left: 50%;
+        top: 2px;
+        width: 1px;
+        height: 24px;
+        transform: translateX(-50%);
+      }
+      .map-crosshair::after {
+        left: 2px;
+        top: 50%;
+        width: 24px;
+        height: 1px;
+        transform: translateY(-50%);
+      }
       .ol-viewport {
         background: #f6f8fa !important;
         font-family: inherit;
@@ -41,7 +72,7 @@
         transform: translateX(-50%);
         z-index: 1000;
         background: rgba(255, 255, 255, 0.97);
-        border: 1px solid #d0d7de;
+        border: 1px solid #666666;
         border-radius: 12px;
         padding: 16px 24px;
         box-shadow:
@@ -155,11 +186,11 @@
       }
       .legend-panel {
         position: absolute;
-        top: 20px;
+        top: 7.5px;
         right: 10px;
         z-index: 1000;
         background: rgba(255, 255, 255, 0.97);
-        border: 1px solid #d0d7de;
+        border: 1px solid #666666;
         border-radius: 8px;
         padding: 10px 12px;
         box-shadow:
@@ -264,8 +295,8 @@
       }
       .top-left-panels {
         position: absolute;
-        top: 20px;
-        left: 10px;
+        top: 7.5px;
+        left: 40px;
         z-index: 1100;
         display: flex;
         align-items: flex-start;
@@ -273,7 +304,7 @@
       }
       .source-panel {
         background: rgba(255, 255, 255, 0.97);
-        border: 1px solid #d0d7de;
+        border: 1px solid #666666;
         border-radius: 8px;
         padding: 10px 12px;
         box-shadow:
@@ -480,6 +511,7 @@
   </head>
   <body>
     <div id="map"></div>
+    <div class="map-crosshair" aria-hidden="true"></div>
     <div class="top-left-panels">
       <div class="source-panel">
         <span>Слой:</span>
@@ -506,125 +538,12 @@
         id="legendToggle"
         title="Свернуть / развернуть"
       >
-        <span class="legend-title">Легенда осадков</span>
+        <span class="legend-title" id="legendTitleText">Легенда: Опасные явления HD</span>
         <span class="legend-toggle-icon">▼</span>
       </div>
       <div class="legend-body">
         <table>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #9caab3"></span>
-            </td>
-            <td>Облака в ср. яр.</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #a2c6fe"></span>
-            </td>
-            <td>Слоистая обл.</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #46fe95"></span>
-            </td>
-            <td>Осадки: слабые</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #01c25e"></span>
-            </td>
-            <td>Осадки: умеренные</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #019a08"></span>
-            </td>
-            <td>Осадки: сильные</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #ffff83"></span>
-            </td>
-            <td>Кучевая облачность</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #3e89fd"></span>
-            </td>
-            <td>Ливневые: слабые</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #013aff"></span>
-            </td>
-            <td>Ливневые: умеренные</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #020877"></span>
-            </td>
-            <td>Ливневые: сильные</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #ffab80"></span>
-            </td>
-            <td>Гроза: (R)</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #ff5984"></span>
-            </td>
-            <td>Гроза: R</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #fd0609"></span>
-            </td>
-            <td>Гроза: R+</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #cd6908"></span>
-            </td>
-            <td>Град: слабый</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #8f490f"></span>
-            </td>
-            <td>Град: умеренный</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #580e08"></span>
-            </td>
-            <td>Град: сильный</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #ffabff"></span>
-            </td>
-            <td>Гроза+Шквал: слабый</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #ff58ff"></span>
-            </td>
-            <td>Гроза+Шквал: умеренный</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #c809ca"></span>
-            </td>
-            <td>Гроза+Шквал: сильный</td>
-          </tr>
-          <tr>
-            <td>
-              <span class="palette-color" style="background: #2f3149"></span>
-            </td>
-            <td>Смерч</td>
-          </tr>
+          <tbody id="legendRows"></tbody>
         </table>
       </div>
     </div>
@@ -663,7 +582,7 @@
         </select>
       </div>
       <div class="status" id="status">Загрузка данных…</div>
-      <div class="status" id="precipInfo">Под курсором: —</div>
+      <div class="status" id="precipInfo">В перекрестии: —</div>
     </div>
     <div class="attribution">© 1x1 Радар ALPHA · DaGGeR</div>
 

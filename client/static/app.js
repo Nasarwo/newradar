@@ -9,7 +9,7 @@ const SATELLITE_CADENCE_MIN = 10;
 const SOURCE_HD = "__hd__";
 const SOURCE_SATELLITE = "__satellite__";
 const SATELLITE_REFERENCE_TILE_URL =
-  "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}";
+  "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places_Alternate/MapServer/tile/{z}/{y}/{x}";
 const NOWCAST_LAYER_LABELS = {
   bufr_phenomena: "Опасные явления",
   bufr_height: "Высота ВГО",
@@ -54,9 +54,12 @@ const satelliteStylePanelEl = document.getElementById("satelliteStylePanel");
 const satelliteTempColorToggleEl = document.getElementById("satelliteTempColor");
 const legendPanelEl = document.getElementById("legendPanel");
 const legendToggleEl = document.getElementById("legendToggle");
+const legendTitleTextEl = document.getElementById("legendTitleText");
+const legendRowsEl = document.getElementById("legendRows");
 const precipInfoEl = document.getElementById("precipInfo");
 
 let map;
+let baseLayer;
 let frameLayer;
 let satelliteLayer;
 let radarLayer;
@@ -88,26 +91,92 @@ let drawCurrentStrokeFeature = null;
 let satelliteWMTSConfig = null;
 const satelliteSourceCache = new Map();
 const PHENOMENA_LEGEND = [
-  { label: "Облака в ср. яр.", rgb: [156, 170, 179] },
-  { label: "Слоистая обл.", rgb: [162, 198, 254] },
-  { label: "Осадки: слабые", rgb: [70, 254, 149] },
-  { label: "Осадки: умеренные", rgb: [1, 194, 94] },
-  { label: "Осадки: сильные", rgb: [1, 154, 8] },
-  { label: "Кучевая облачность", rgb: [255, 255, 131] },
-  { label: "Ливневые: слабые", rgb: [62, 137, 253] },
-  { label: "Ливневые: умеренные", rgb: [1, 58, 255] },
-  { label: "Ливневые: сильные", rgb: [2, 8, 119] },
-  { label: "Гроза: (R)", rgb: [255, 171, 128] },
-  { label: "Гроза: R", rgb: [255, 89, 132] },
-  { label: "Гроза: R+", rgb: [253, 6, 9] },
-  { label: "Град: слабый", rgb: [205, 105, 8] },
-  { label: "Град: умеренный", rgb: [143, 73, 15] },
-  { label: "Град: сильный", rgb: [88, 14, 8] },
-  { label: "Гроза+Шквал: слабый", rgb: [255, 171, 255] },
-  { label: "Гроза+Шквал: умеренный", rgb: [255, 88, 255] },
-  { label: "Гроза+Шквал: сильный", rgb: [200, 9, 202] },
-  { label: "Смерч", rgb: [47, 49, 73] },
+  { label: "нет явлений", rgb: [230, 230, 230] },
+  { label: "обл. сред. яруса", rgb: [156, 170, 179] },
+  { label: "сл. образования", rgb: [162, 198, 254] },
+  { label: "осадки слабые", rgb: [70, 254, 149] },
+  { label: "осадки умеренные", rgb: [1, 194, 94] },
+  { label: "осадки сильные", rgb: [1, 154, 8] },
+  { label: "кучевая обл", rgb: [255, 255, 131] },
+  { label: "ливень слабый", rgb: [62, 137, 253] },
+  { label: "ливень умеренный", rgb: [1, 58, 255] },
+  { label: "ливень сильный", rgb: [2, 8, 119] },
+  { label: "гроза (R)", rgb: [255, 171, 128] },
+  { label: "гроза R)", rgb: [255, 89, 132] },
+  { label: "гроза R", rgb: [253, 6, 9] },
+  { label: "град слабый", rgb: [205, 105, 8] },
+  { label: "град умеренный", rgb: [143, 73, 15] },
+  { label: "град сильный", rgb: [88, 14, 8] },
+  { label: "шквал слабый", rgb: [255, 171, 255] },
+  { label: "шквал умеренный", rgb: [255, 88, 255] },
+  { label: "шквал сильный", rgb: [200, 9, 202] },
+  { label: "смерч", rgb: [47, 49, 73] },
 ];
+const HEIGHT_LEGEND = [
+  { label: "нет эхо", rgb: [230, 230, 230] },
+  { label: "0.00 км", rgb: [112, 232, 179] },
+  { label: "0.20 км", rgb: [112, 232, 183] },
+  { label: "0.50 км", rgb: [104, 214, 176] },
+  { label: "1.00 км", rgb: [96, 195, 166] },
+  { label: "2.00 км", rgb: [90, 163, 149] },
+  { label: "3.00 км", rgb: [82, 125, 119] },
+  { label: "4.00 км", rgb: [108, 211, 237] },
+  { label: "5.00 км", rgb: [96, 184, 234] },
+  { label: "6.00 км", rgb: [88, 146, 226] },
+  { label: "7.00 км", rgb: [86, 96, 182] },
+  { label: "8.00 км", rgb: [214, 200, 93] },
+  { label: "9.00 км", rgb: [218, 112, 77] },
+  { label: "10.00 км", rgb: [214, 88, 83] },
+  { label: "11.00 км", rgb: [154, 78, 84] },
+  { label: "12.00 км", rgb: [120, 190, 94] },
+  { label: "13.00 км", rgb: [80, 146, 86] },
+  { label: "14.00 км", rgb: [206, 95, 153] },
+  { label: "15.00 км", rgb: [216, 110, 192] },
+];
+const DBZ_LEGEND = [
+  { label: "empty", rgb: [230, 230, 230] },
+  { label: "-30 dBZ", rgb: [215, 215, 215] },
+  { label: "-10 dBZ", rgb: [200, 200, 200] },
+  { label: "-5 dBZ", rgb: [179, 210, 234] },
+  { label: "0 dBZ", rgb: [182, 227, 146] },
+  { label: "5 dBZ", rgb: [120, 235, 114] },
+  { label: "10 dBZ", rgb: [95, 184, 234] },
+  { label: "15 dBZ", rgb: [76, 120, 232] },
+  { label: "20 dBZ", rgb: [75, 72, 215] },
+  { label: "25 dBZ", rgb: [74, 71, 174] },
+  { label: "30 dBZ", rgb: [231, 233, 92] },
+  { label: "35 dBZ", rgb: [244, 180, 95] },
+  { label: "40 dBZ", rgb: [248, 118, 113] },
+  { label: "45 dBZ", rgb: [249, 88, 88] },
+  { label: "50 dBZ", rgb: [114, 212, 99] },
+  { label: "55 dBZ", rgb: [84, 182, 83] },
+  { label: "60 dBZ", rgb: [225, 78, 235] },
+  { label: "65 dBZ", rgb: [201, 65, 223] },
+  { label: "70 dBZ", rgb: [142, 76, 76] },
+];
+const PRECIP_LEGEND = [
+  { label: "нет осадков", rgb: [230, 230, 230] },
+  { label: "0.10 мм/ч", rgb: [185, 185, 185] },
+  { label: "0.30 мм/ч", rgb: [143, 143, 143] },
+  { label: "0.50 мм/ч", rgb: [90, 135, 232] },
+  { label: "1.00 мм/ч", rgb: [76, 75, 169] },
+  { label: "3.00 мм/ч", rgb: [236, 234, 99] },
+  { label: "5.00 мм/ч", rgb: [205, 232, 92] },
+  { label: "7.00 мм/ч", rgb: [242, 177, 92] },
+  { label: "10.00 мм/ч", rgb: [247, 119, 88] },
+  { label: "20.00 мм/ч", rgb: [249, 92, 87] },
+  { label: "30.00 мм/ч", rgb: [150, 230, 154] },
+  { label: "50.00 мм/ч", rgb: [100, 185, 92] },
+  { label: "100.00 мм/ч", rgb: [223, 155, 224] },
+  { label: ">100 мм/ч", rgb: [203, 79, 209] },
+];
+const LEGEND_CONFIG_BY_SOURCE = {
+  [SOURCE_HD]: { title: "Опасные явления HD", items: PHENOMENA_LEGEND, maxDist: 70 },
+  bufr_phenomena: { title: "Опасные явления", items: PHENOMENA_LEGEND, maxDist: 70 },
+  bufr_height: { title: "Высота ВГО", items: HEIGHT_LEGEND, maxDist: 56 },
+  bufr_dbz1: { title: "Отражаемость (dBZ)", items: DBZ_LEGEND, maxDist: 56 },
+  bufr_precip: { title: "Интенсивность", items: PRECIP_LEGEND, maxDist: 56 },
+};
 const PHENOMENA_MATCH_MAX_DIST = 70;
 const SHOWER_MATCH_MAX_DIST = 130;
 const framePixelCache = new Map();
@@ -133,6 +202,7 @@ const NOWCAST_PIXEL_GAP_OVERLAY = true;
 const NOWCAST_PIXEL_GAP_MIN_SCREEN_PX = 3;
 const NOWCAST_PIXEL_GAP_MAX_SCREEN_PX = 1.25;
 let frameRenderToken = 0;
+let centerProbeToken = 0;
 const nowcastBlobUrlCache = new Map();
 const nowcastBlobUrlOrder = [];
 const satelliteBlobUrlCache = new Map();
@@ -203,6 +273,47 @@ function getSourceDisplayName(sourceKey) {
   return NOWCAST_LAYER_LABELS[sourceKey] || sourceKey;
 }
 
+function getLegendConfigForSource(sourceKey) {
+  return LEGEND_CONFIG_BY_SOURCE[sourceKey] || LEGEND_CONFIG_BY_SOURCE[SOURCE_HD];
+}
+
+function renderActiveLegend() {
+  if (!legendRowsEl) return;
+  if (activeSource === SOURCE_SATELLITE) {
+    if (legendTitleTextEl) legendTitleTextEl.textContent = "Легенда: спутник";
+    legendRowsEl.innerHTML = "";
+    const row = document.createElement("tr");
+    const colorCell = document.createElement("td");
+    const textCell = document.createElement("td");
+    const swatch = document.createElement("span");
+    swatch.className = "palette-color";
+    swatch.style.background = "#d0d7de";
+    colorCell.appendChild(swatch);
+    textCell.textContent = "для спутника легенда осадков не применяется";
+    row.appendChild(colorCell);
+    row.appendChild(textCell);
+    legendRowsEl.appendChild(row);
+    return;
+  }
+
+  const cfg = getLegendConfigForSource(activeSource);
+  if (legendTitleTextEl) legendTitleTextEl.textContent = `Легенда: ${cfg.title}`;
+  legendRowsEl.innerHTML = "";
+  for (const item of cfg.items) {
+    const row = document.createElement("tr");
+    const colorCell = document.createElement("td");
+    const textCell = document.createElement("td");
+    const swatch = document.createElement("span");
+    swatch.className = "palette-color";
+    swatch.style.background = `rgb(${item.rgb[0]}, ${item.rgb[1]}, ${item.rgb[2]})`;
+    colorCell.appendChild(swatch);
+    textCell.textContent = item.label;
+    row.appendChild(colorCell);
+    row.appendChild(textCell);
+    legendRowsEl.appendChild(row);
+  }
+}
+
 function clamp01(v) {
   if (v < 0) return 0;
   if (v > 1) return 1;
@@ -218,9 +329,10 @@ function lerpColor(c1, c2, t) {
 }
 
 function pseudoBtCByLuma(luma) {
-  // Псевдо-BT из яркости для визуальной CTA-шкалы (без физкалибровки).
+  // Для большинства IR-изображений в этой ленте: чем пиксель светлее,
+  // тем холоднее верхняя граница облака.
   const n = Math.pow(clamp01(luma / 255), 0.92);
-  return -90 + n * 140;
+  return 50 - n * 140;
 }
 
 const SATELLITE_CTA_STOPS = [
@@ -603,7 +715,7 @@ function setMeasureMode(enabled) {
 
 function createMap() {
   const projection = "EPSG:3857";
-  const base = new ol.layer.Tile({
+  baseLayer = new ol.layer.Tile({
     source: new ol.source.OSM({ wrapX: false }),
     opacity: 1,
     zIndex: 0,
@@ -641,7 +753,7 @@ function createMap() {
 
   map = new ol.Map({
     target: "map",
-    layers: [base, satelliteLayer, frameLayer, satelliteReferenceLayer],
+    layers: [baseLayer, satelliteLayer, frameLayer, satelliteReferenceLayer],
     view: new ol.View({
       projection,
       center: ol.proj.fromLonLat([
@@ -699,6 +811,9 @@ function createMap() {
       console.warn("Nowcast rerender on zoom failed:", e);
     });
   });
+  map.on("moveend", () => {
+    inspectPrecipAtCrosshairCenter().catch(() => {});
+  });
 
   map.on("pointerdown", (event) => {
     if (!drawMode) return;
@@ -713,9 +828,6 @@ function createMap() {
   });
 
   map.on("singleclick", (event) => {
-    if (!drawMode && !measureMode) {
-      inspectPrecipAtCoordinate(event.coordinate);
-    }
     if (drawMode) return;
     if (!measureMode) return;
     if (!measureStart) {
@@ -884,10 +996,15 @@ function setFrameExtentAndUrl(extent, url, projection, interpolate = false) {
   );
 }
 
-function getPhenomenaByRgb(r, g, b) {
-  let best = null;
+function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
+  const cfg = getLegendConfigForSource(sourceKey);
+  const items = cfg?.items || [];
+  if (!items.length) return null;
+  if (alpha === 0) return items[0].label;
+
+  let best = items[0];
   let bestDist = Infinity;
-  for (const p of PHENOMENA_LEGEND) {
+  for (const p of items) {
     const dr = r - p.rgb[0];
     const dg = g - p.rgb[1];
     const db = b - p.rgb[2];
@@ -897,30 +1014,30 @@ function getPhenomenaByRgb(r, g, b) {
       best = p;
     }
   }
-  if (!best) return null;
-  if (bestDist <= PHENOMENA_MATCH_MAX_DIST) return best.label;
+  if (bestDist <= (cfg?.maxDist || PHENOMENA_MATCH_MAX_DIST)) return best.label;
 
-  // Более мягкий fallback для синих "ливневых" оттенков:
-  // в данных часто встречаются синие переходные пиксели.
-  const looksBlueShower = b > g && b > r && r < 130;
-  if (looksBlueShower) {
-    const showerCandidates = PHENOMENA_LEGEND.filter((p) =>
-      p.label.startsWith("Ливневые:"),
-    );
-    let showerBest = null;
-    let showerBestDist = Infinity;
-    for (const p of showerCandidates) {
-      const dr = r - p.rgb[0];
-      const dg = g - p.rgb[1];
-      const db = b - p.rgb[2];
-      const dist = Math.sqrt(dr * dr + dg * dg + db * db);
-      if (dist < showerBestDist) {
-        showerBestDist = dist;
-        showerBest = p;
+  // Для "Опасных явлений" оставляем чуть более мягкий fallback на синие ливневые тона.
+  if (sourceKey === SOURCE_HD || sourceKey === "bufr_phenomena") {
+    const looksBlueShower = b > g && b > r && r < 130;
+    if (looksBlueShower) {
+      const showerCandidates = PHENOMENA_LEGEND.filter((p) =>
+        p.label.startsWith("ливень"),
+      );
+      let showerBest = null;
+      let showerBestDist = Infinity;
+      for (const p of showerCandidates) {
+        const dr = r - p.rgb[0];
+        const dg = g - p.rgb[1];
+        const db = b - p.rgb[2];
+        const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+        if (dist < showerBestDist) {
+          showerBestDist = dist;
+          showerBest = p;
+        }
       }
-    }
-    if (showerBest && showerBestDist <= SHOWER_MATCH_MAX_DIST) {
-      return showerBest.label;
+      if (showerBest && showerBestDist <= SHOWER_MATCH_MAX_DIST) {
+        return showerBest.label;
+      }
     }
   }
 
@@ -1024,24 +1141,44 @@ async function getStyledFrameUrl(url) {
   return styledUrl;
 }
 
-async function inspectPrecipAtCoordinate(coord3857) {
-  if (!frames.length) return;
+async function inspectPrecipAtCrosshairCenter() {
+  if (!map || !frames.length) return;
+  if (activeSource === SOURCE_SATELLITE) {
+    setPrecipInfo("В перекрестии: спутниковый слой");
+    return;
+  }
   const frame = frames[currentFrame];
   if (!frame?.url) return;
+  const probeToken = ++centerProbeToken;
   try {
-    // Важно: берем именно тот кадр, который показан на карте (warped/raw),
-    // иначе при геодеформации координаты и пиксели не совпадают.
+    const center3857 = map.getView()?.getCenter?.();
+    if (!Array.isArray(center3857) || center3857.length < 2) return;
     const px = await getFramePixels(frame.url);
-    const lonLat = ol.proj.transform(coord3857, "EPSG:3857", "EPSG:4326");
-    const lon = lonLat[0];
-    const lat = lonLat[1];
-    const [west, south, east, north] = geoBounds;
+    if (probeToken !== centerProbeToken) return;
+
+    const projection = frame?.projection || "EPSG:4326";
+    const extent =
+      Array.isArray(frame?.imageExtent) && frame.imageExtent.length === 4
+        ? frame.imageExtent
+        : projection === "EPSG:3857"
+          ? geoBounds3857
+          : geoBounds;
+    if (!Array.isArray(extent) || extent.length < 4) return;
+
+    let coordX = center3857[0];
+    let coordY = center3857[1];
+    if (projection !== "EPSG:3857") {
+      const ll = ol.proj.transform(center3857, "EPSG:3857", "EPSG:4326");
+      coordX = ll[0];
+      coordY = ll[1];
+    }
+    const [west, south, east, north] = extent;
     if (!(east > west && north > south)) return;
 
-    let x = Math.round(((lon - west) / (east - west)) * (px.width - 1));
-    let y = Math.round(((north - lat) / (north - south)) * (px.height - 1));
+    const x = Math.round(((coordX - west) / (east - west)) * (px.width - 1));
+    const y = Math.round(((north - coordY) / (north - south)) * (px.height - 1));
     if (x < 0 || x >= px.width || y < 0 || y >= px.height) {
-      setPrecipInfo("Под курсором: вне зоны радарного кадра");
+      setPrecipInfo("В перекрестии: вне зоны радарного кадра");
       return;
     }
 
@@ -1050,18 +1187,16 @@ async function inspectPrecipAtCoordinate(coord3857) {
     const g = px.data[i + 1];
     const b = px.data[i + 2];
     const a = px.data[i + 3];
-    if (a === 0) {
-      setPrecipInfo("Под курсором: нет эхо/нет данных");
-      return;
-    }
-    const label = getPhenomenaByRgb(r, g, b);
+    const label = getLegendLabelByRgb(activeSource, r, g, b, a);
     if (!label) {
-      setPrecipInfo(`Под курсором: неопределенный тип (RGB ${r},${g},${b})`);
+      setPrecipInfo(`В перекрестии: неопределено (RGB ${r},${g},${b})`);
       return;
     }
-    setPrecipInfo(`Под курсором: ${label}`);
+    setPrecipInfo(`В перекрестии: ${label}`);
   } catch {
-    setPrecipInfo("Под курсором: не удалось определить тип");
+    if (probeToken === centerProbeToken) {
+      setPrecipInfo("В перекрестии: не удалось определить тип");
+    }
   }
 }
 
@@ -1434,6 +1569,8 @@ async function switchSource(layerOrHd) {
       return;
     }
     activeSource = SOURCE_SATELLITE;
+    renderActiveLegend();
+    baseLayer?.setVisible(false);
     frameLayer?.setVisible(true);
     satelliteLayer?.setVisible(false);
     satelliteReferenceLayer?.setVisible(true);
@@ -1454,6 +1591,8 @@ async function switchSource(layerOrHd) {
 
   if (next === SOURCE_HD) {
     activeSource = SOURCE_HD;
+    renderActiveLegend();
+    baseLayer?.setVisible(true);
     frameLayer?.setVisible(true);
     satelliteLayer?.setVisible(false);
     satelliteReferenceLayer?.setVisible(false);
@@ -1475,6 +1614,8 @@ async function switchSource(layerOrHd) {
     return;
   }
   activeSource = next;
+  renderActiveLegend();
+  baseLayer?.setVisible(true);
   frameLayer?.setVisible(true);
   satelliteLayer?.setVisible(false);
   satelliteReferenceLayer?.setVisible(false);
@@ -1505,6 +1646,7 @@ async function renderFrame(index) {
     timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
     const layerLabel = getSourceDisplayName(activeSource);
     setStatus(`${layerLabel}: кадр ${currentFrame + 1} / ${frames.length}`);
+    inspectPrecipAtCrosshairCenter().catch(() => {});
     return;
   }
   const projection = frame?.projection || "EPSG:4326";
@@ -1551,6 +1693,7 @@ async function renderFrame(index) {
   timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
   const layerLabel = getSourceDisplayName(activeSource);
   setStatus(`${layerLabel}: кадр ${currentFrame + 1} / ${frames.length}`);
+  inspectPrecipAtCrosshairCenter().catch(() => {});
 }
 
 function stopPlayback(jumpToLast = true) {
@@ -1726,6 +1869,7 @@ async function init() {
     frames = hdFrames.slice();
     createMap();
     bindControls();
+    renderActiveLegend();
     upsertRadarLayer();
     try {
       await loadNowcastMeta();
@@ -1740,6 +1884,7 @@ async function init() {
     timelineEl.max = String(Math.max(0, frames.length - 1));
     timelineEl.value = "0";
     await renderFrame(0);
+    await inspectPrecipAtCrosshairCenter();
     if (frames.length > 1) startPlayback();
     else updatePlayButton();
     dataRefreshTimer = setInterval(refreshData, DATA_REFRESH_MS);

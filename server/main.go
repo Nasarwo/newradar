@@ -614,16 +614,20 @@ func parseQueryFloatOrDefault(r *http.Request, key string, def float64) float64 
 }
 
 func handleNowcastMeta(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	w.Header().Set("Content-Type", "application/json")
+	log.Printf("[nowcast/meta] request: layers=%q", strings.TrimSpace(r.URL.Query().Get("layers")))
 	capXML, err := getNowcastCapabilitiesCached(r.Context())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("capabilities error: %v", err), http.StatusBadGateway)
+		log.Printf("[nowcast/meta] error: capabilities: %v", err)
 		return
 	}
 
 	layerTimes, layerTitles, allLayers, err := parseNowcastCapabilities(capXML)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("capabilities parse error: %v", err), http.StatusBadGateway)
+		log.Printf("[nowcast/meta] error: capabilities parse: %v", err)
 		return
 	}
 
@@ -665,13 +669,23 @@ func handleNowcastMeta(w http.ResponseWriter, r *http.Request) {
 		LatestTime:     latest,
 	}
 	_ = json.NewEncoder(w).Encode(out)
+	log.Printf(
+		"[nowcast/meta] done: selected=%q layers=%d times=%d latest=%q elapsed=%s",
+		selected,
+		len(allLayers),
+		len(times),
+		latest,
+		time.Since(started).Round(time.Millisecond),
+	)
 }
 
 func handleNowcastFrames(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	w.Header().Set("Content-Type", "application/json")
 	layer := strings.TrimSpace(r.URL.Query().Get("layer"))
 	if layer == "" {
 		http.Error(w, "layer is required", http.StatusBadRequest)
+		log.Printf("[nowcast/frames] bad request: missing layer")
 		return
 	}
 
@@ -683,6 +697,7 @@ func handleNowcastFrames(w http.ResponseWriter, r *http.Request) {
 	if crs == "" {
 		crs = "EPSG:3857"
 	}
+	log.Printf("[nowcast/frames] request: layer=%q version=%s crs=%s", layer, version, crs)
 
 	state.mu.RLock()
 	defaultBounds := state.geoBounds
@@ -695,6 +710,7 @@ func handleNowcastFrames(w http.ResponseWriter, r *http.Request) {
 	north := parseQueryFloatOrDefault(r, "north", defaultBounds[3])
 	if !NumberIsFinite(west) || !NumberIsFinite(south) || !NumberIsFinite(east) || !NumberIsFinite(north) || east <= west || north <= south {
 		http.Error(w, "invalid bounds", http.StatusBadRequest)
+		log.Printf("[nowcast/frames] bad request: invalid bounds")
 		return
 	}
 
@@ -710,19 +726,26 @@ func handleNowcastFrames(w http.ResponseWriter, r *http.Request) {
 	capXML, err := getNowcastCapabilitiesCached(r.Context())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("capabilities error: %v", err), http.StatusBadGateway)
+		log.Printf("[nowcast/frames] error: capabilities: %v", err)
 		return
 	}
 	layerTimes, _, _, err := parseNowcastCapabilities(capXML)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("capabilities parse error: %v", err), http.StatusBadGateway)
+		log.Printf("[nowcast/frames] error: capabilities parse: %v", err)
 		return
 	}
 	times := intersectLayerTimes(layer, layerTimes)
 	if len(times) == 0 {
 		http.Error(w, "no available times for selected layer", http.StatusBadRequest)
+		log.Printf("[nowcast/frames] no times for layer=%q", layer)
 		return
 	}
 	limit := parseQueryInt(r, "limit", 18, 1, 72)
+	log.Printf(
+		"[nowcast/frames] resolved params: layer=%q times_available=%d limit=%d size=%dx%d bounds=[%.4f %.4f %.4f %.4f]",
+		layer, len(times), limit, width, height, west, south, east, north,
+	)
 	if len(times) > limit {
 		times = times[len(times)-limit:]
 	}
@@ -737,6 +760,10 @@ func handleNowcastFrames(w http.ResponseWriter, r *http.Request) {
 	}
 
 	frames := make([]nowcastFrameInfo, 0, len(times))
+	prefetchHit := 0
+	prefetchMiss := 0
+	prefetchFetched := 0
+	prefetchFailed := 0
 	for _, t := range times {
 		values := url.Values{}
 		values.Set("SERVICE", "WMS")
@@ -754,14 +781,20 @@ func handleNowcastFrames(w http.ResponseWriter, r *http.Request) {
 
 		canonical := canonicalNowcastQuery(values)
 		if _, _, ok := readNowcastCache(canonical, nowcastCacheMaxAge("getmap", values)); !ok {
+			prefetchMiss++
 			if _, _, _, err := fetchNowcastAndMaybeCache(r.Context(), canonical, "getmap", true); err != nil {
 				// Клиент мог прервать запрос при переключении слоя/перезагрузке страницы.
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					log.Printf("[nowcast/frames] canceled while prefetch: layer=%q time=%s", layer, t)
 					break
 				}
 				log.Printf("Nowcast prefetch warning (%s @ %s): %v", layer, t, err)
+				prefetchFailed++
 				continue
 			}
+			prefetchFetched++
+		} else {
+			prefetchHit++
 		}
 		frames = append(frames, nowcastFrameInfo{
 			URL:         "/api/nowcast/wms?" + canonical,
@@ -785,9 +818,20 @@ func handleNowcastFrames(w http.ResponseWriter, r *http.Request) {
 		Frames:      frames,
 	}
 	_ = json.NewEncoder(w).Encode(out)
+	log.Printf(
+		"[nowcast/frames] done: layer=%q frames=%d cache_hit=%d cache_miss=%d fetched=%d failed=%d elapsed=%s",
+		layer,
+		len(frames),
+		prefetchHit,
+		prefetchMiss,
+		prefetchFetched,
+		prefetchFailed,
+		time.Since(started).Round(time.Millisecond),
+	)
 }
 
 func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	w.Header().Set("Content-Type", "application/json")
 	requestedLayer := strings.TrimSpace(r.URL.Query().Get("layer"))
 	if requestedLayer == "" {
@@ -799,6 +843,7 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 	limit := parseQueryInt(r, "limit", 18, 1, 72)
 	cadenceMin := parseQueryInt(r, "cadenceMin", 10, 5, 60)
 	cadence := time.Duration(cadenceMin) * time.Minute
+	log.Printf("[satellite/frames] request: layer=%q limit=%d cadence=%dmin", requestedLayer, limit, cadenceMin)
 	token, err := getEUMETViewAccessToken(r.Context())
 	authMode := "token"
 	if err != nil {
@@ -809,21 +854,25 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 	_, capXML, err := getEUMETCapabilitiesWithFallback(r.Context(), token)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("eumet capabilities error: %v", err), http.StatusBadGateway)
+		log.Printf("[satellite/frames] error: capabilities: %v", err)
 		return
 	}
 	layerTimes, layerTitles, _, err := parseNowcastCapabilities(capXML)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("eumet capabilities parse error: %v", err), http.StatusBadGateway)
+		log.Printf("[satellite/frames] error: capabilities parse: %v", err)
 		return
 	}
 	layer, resolvedTitle, err := resolveEUMETLayer(requestedLayer, layerTimes, layerTitles)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("eumet layer resolution error: %v", err), http.StatusBadRequest)
+		log.Printf("[satellite/frames] error: layer resolve: %v", err)
 		return
 	}
 	times := intersectLayerTimes(layer, layerTimes)
 	if len(times) == 0 {
 		http.Error(w, "no available times for selected EUMET layer", http.StatusBadRequest)
+		log.Printf("[satellite/frames] no times for layer=%q", layer)
 		return
 	}
 
@@ -846,18 +895,28 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 	picked, err := pickSatelliteTimes(times, limit, cadence)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("satellite time selection error: %v", err), http.StatusBadGateway)
+		log.Printf("[satellite/frames] error: pick times: %v", err)
 		return
 	}
+	log.Printf(
+		"[satellite/frames] resolved: layer=%q title=%q auth=%s times_available=%d picked=%d size=%dx%d",
+		layer, resolvedTitle, authMode, len(times), len(picked), width, height,
+	)
 	frames := make([]satelliteFrameInfo, 0, len(picked))
 	imageExtent := [4]float64{west, south, east, north}
+	prefetchOK := 0
+	prefetchFail := 0
 	for _, tStr := range picked {
 		if _, _, _, _, err := fetchSatelliteImageWithFallback(r.Context(), token, layer, tStr, imageExtent, width, height, true); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				log.Printf("[satellite/frames] canceled while prefetch: layer=%q time=%s", layer, tStr)
 				break
 			}
 			log.Printf("EUMET prefetch warning (%s @ %s): %v", layer, tStr, err)
+			prefetchFail++
 			continue
 		}
+		prefetchOK++
 		frames = append(frames, satelliteFrameInfo{
 			URL: "/api/satellite/image?layer=" + url.QueryEscape(layer) +
 				"&time=" + url.QueryEscape(tStr) +
@@ -895,9 +954,14 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 		Frames:      frames,
 	}
 	_ = json.NewEncoder(w).Encode(out)
+	log.Printf(
+		"[satellite/frames] done: layer=%q frames=%d prefetch_ok=%d prefetch_fail=%d elapsed=%s",
+		layer, len(frames), prefetchOK, prefetchFail, time.Since(started).Round(time.Millisecond),
+	)
 }
 
 func handleSatelliteImageProxy(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	layer := strings.TrimSpace(r.URL.Query().Get("layer"))
 	if layer == "" {
 		layer = strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER"))
@@ -908,6 +972,7 @@ func handleSatelliteImageProxy(w http.ResponseWriter, r *http.Request) {
 	timeStr := strings.TrimSpace(r.URL.Query().Get("time"))
 	if timeStr == "" {
 		http.Error(w, "time is required", http.StatusBadRequest)
+		log.Printf("[satellite/image] bad request: missing time")
 		return
 	}
 	west := parseQueryFloatOrDefault(r, "west", -180)
@@ -917,6 +982,10 @@ func handleSatelliteImageProxy(w http.ResponseWriter, r *http.Request) {
 	defW, defH := defaultSatelliteImageSize(west, south, east, north)
 	width := parseQueryInt(r, "width", defW, 128, 8192)
 	height := parseQueryInt(r, "height", defH, 128, 8192)
+	log.Printf(
+		"[satellite/image] request: layer=%q time=%s size=%dx%d bounds=[%.4f %.4f %.4f %.4f]",
+		layer, timeStr, width, height, west, south, east, north,
+	)
 	token, err := getEUMETViewAccessToken(r.Context())
 	if err != nil {
 		log.Printf("EUMET token unavailable in image proxy, use public access mode: %v", err)
@@ -934,6 +1003,7 @@ func handleSatelliteImageProxy(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("satellite upstream error: %v", err), http.StatusBadGateway)
+		log.Printf("[satellite/image] error: %v", err)
 		return
 	}
 	if status != http.StatusOK {
@@ -943,6 +1013,7 @@ func handleSatelliteImageProxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
 		w.WriteHeader(status)
 		_, _ = w.Write(body)
+		log.Printf("[satellite/image] upstream non-200: status=%d content-type=%q bytes=%d elapsed=%s", status, contentType, len(body), time.Since(started).Round(time.Millisecond))
 		return
 	}
 	if contentType == "" {
@@ -950,6 +1021,7 @@ func handleSatelliteImageProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", contentType)
 	_, _ = w.Write(body)
+	log.Printf("[satellite/image] done: status=200 content-type=%q bytes=%d elapsed=%s", contentType, len(body), time.Since(started).Round(time.Millisecond))
 }
 
 func satelliteImageCacheMaxAge(timeStr string) time.Duration {
@@ -1066,8 +1138,10 @@ func fetchSatelliteImageAndMaybeCache(
 	cacheKey := sourceID + "|" + strings.TrimSpace(wmsBase) + "|" + canonicalNowcastQuery(values)
 	cacheMaxAge := satelliteImageCacheMaxAge(timeStr)
 	if body, contentType, ok := readSatelliteCache("img:"+cacheKey, cacheMaxAge); ok {
+		log.Printf("[satellite/cache] HIT image: layer=%q time=%s source=%s bytes=%d", layer, timeStr, sourceID, len(body))
 		return body, contentType, http.StatusOK, nil
 	}
+	log.Printf("[satellite/cache] MISS image: layer=%q time=%s source=%s -> fetch upstream", layer, timeStr, sourceID)
 	upstreamValues := cloneValues(values)
 	if strings.TrimSpace(token) != "" {
 		upstreamValues.Set("access_token", token)
@@ -1097,6 +1171,7 @@ func fetchSatelliteImageAndMaybeCache(
 	if allowCacheWrite && resp.StatusCode == http.StatusOK {
 		writeSatelliteCache("img:"+cacheKey, contentType, body)
 	}
+	log.Printf("[satellite/upstream] image: layer=%q time=%s status=%d bytes=%d content-type=%q", layer, timeStr, resp.StatusCode, len(body), contentType)
 	return body, contentType, resp.StatusCode, nil
 }
 
@@ -1137,8 +1212,10 @@ func getEUMETCapabilitiesCached(ctx context.Context, wmsBase string, token strin
 	}
 	cacheKey := "capabilities:" + sourceID + "|" + strings.TrimSpace(wmsBase) + "|" + canonical
 	if body, _, ok := readSatelliteCache(cacheKey, 10*time.Minute); ok {
+		log.Printf("[satellite/cache] HIT capabilities: source=%s base=%s bytes=%d", sourceID, strings.TrimSpace(wmsBase), len(body))
 		return body, nil
 	}
+	log.Printf("[satellite/cache] MISS capabilities: source=%s base=%s -> fetch upstream", sourceID, strings.TrimSpace(wmsBase))
 	upstreamValues := cloneValues(values)
 	if strings.TrimSpace(token) != "" {
 		upstreamValues.Set("access_token", token)
@@ -1158,6 +1235,7 @@ func getEUMETCapabilitiesCached(ctx context.Context, wmsBase string, token strin
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		log.Printf("[satellite/upstream] capabilities non-200: source=%s base=%s status=%d", sourceID, strings.TrimSpace(wmsBase), resp.StatusCode)
 		return nil, fmt.Errorf("available http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	body, err := io.ReadAll(resp.Body)
@@ -1165,6 +1243,7 @@ func getEUMETCapabilitiesCached(ctx context.Context, wmsBase string, token strin
 		return nil, err
 	}
 	writeSatelliteCache(cacheKey, "application/xml", body)
+	log.Printf("[satellite/upstream] capabilities done: source=%s base=%s bytes=%d", sourceID, strings.TrimSpace(wmsBase), len(body))
 	return body, nil
 }
 
@@ -1482,6 +1561,13 @@ func fetchNowcastAndMaybeCache(
 	allowCacheWrite bool,
 ) ([]byte, string, int, error) {
 	upstreamURL := nowcastWMSBaseURL + "?" + canonical
+	reqURL, _ := url.Parse(upstreamURL)
+	layer := ""
+	timeVal := ""
+	if reqURL != nil {
+		layer = strings.TrimSpace(firstNonEmpty(reqURL.Query().Get("LAYERS"), reqURL.Query().Get("layers")))
+		timeVal = strings.TrimSpace(firstNonEmpty(reqURL.Query().Get("TIME"), reqURL.Query().Get("time")))
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamURL, nil)
 	if err != nil {
 		return nil, "", 0, err
@@ -1507,10 +1593,12 @@ func fetchNowcastAndMaybeCache(
 	if allowCacheWrite && resp.StatusCode == http.StatusOK && (reqType == "getmap" || reqType == "getcapabilities") {
 		writeNowcastCache(canonical, contentType, body)
 	}
+	log.Printf("[nowcast/upstream] %s: status=%d bytes=%d layer=%q time=%q", strings.ToUpper(reqType), resp.StatusCode, len(body), layer, timeVal)
 	return body, contentType, resp.StatusCode, nil
 }
 
 func handleNowcastWMSProxy(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	q := r.URL.Query()
 	if q.Get("SERVICE") == "" && q.Get("service") == "" {
 		q.Set("SERVICE", "WMS")
@@ -1523,6 +1611,8 @@ func handleNowcastWMSProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqType := strings.ToLower(strings.TrimSpace(firstNonEmpty(q.Get("REQUEST"), q.Get("request"))))
+	layer := strings.TrimSpace(firstNonEmpty(q.Get("LAYERS"), q.Get("layers")))
+	timeVal := strings.TrimSpace(firstNonEmpty(q.Get("TIME"), q.Get("time")))
 	canonical := canonicalNowcastQuery(q)
 	cacheMaxAge := nowcastCacheMaxAge(reqType, q)
 	if (reqType == "getmap" || reqType == "getcapabilities") && cacheMaxAge > 0 {
@@ -1530,6 +1620,7 @@ func handleNowcastWMSProxy(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", contentType)
 			w.Header().Set("X-Nowcast-Cache", "HIT")
 			_, _ = w.Write(body)
+			log.Printf("[nowcast/proxy] HIT: type=%s layer=%q time=%q bytes=%d elapsed=%s", reqType, layer, timeVal, len(body), time.Since(started).Round(time.Millisecond))
 			return
 		}
 	}
@@ -1537,12 +1628,14 @@ func handleNowcastWMSProxy(w http.ResponseWriter, r *http.Request) {
 	body, contentType, status, err := fetchNowcastAndMaybeCache(r.Context(), canonical, reqType, true)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("nowcast upstream error: %v", err), http.StatusBadGateway)
+		log.Printf("[nowcast/proxy] error: type=%s layer=%q time=%q err=%v", reqType, layer, timeVal, err)
 		return
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Nowcast-Cache", "MISS")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+	log.Printf("[nowcast/proxy] MISS: type=%s layer=%q time=%q status=%d bytes=%d elapsed=%s", reqType, layer, timeVal, status, len(body), time.Since(started).Round(time.Millisecond))
 }
 
 func parseNowcastCapabilities(xmlData []byte) (map[string][]string, map[string]string, []nowcastLayerInfo, error) {
@@ -1729,8 +1822,10 @@ func intersectLayerTimes(layersCSV string, layerTimes map[string][]string) []str
 func getNowcastCapabilitiesCached(ctx context.Context) ([]byte, error) {
 	q := "REQUEST=GetCapabilities&SERVICE=WMS&VERSION=1.3.0"
 	if body, _, ok := readNowcastCache(q, 10*time.Minute); ok {
+		log.Printf("[nowcast/cache] HIT capabilities: bytes=%d", len(body))
 		return body, nil
 	}
+	log.Printf("[nowcast/cache] MISS capabilities -> fetch upstream")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nowcastWMSBaseURL+"?"+q, nil)
 	if err != nil {
 		return nil, err
@@ -1744,6 +1839,7 @@ func getNowcastCapabilitiesCached(ctx context.Context) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("[nowcast/upstream] capabilities non-200: status=%d", resp.StatusCode)
 		return nil, fmt.Errorf("capabilities http %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(resp.Body)
@@ -1755,6 +1851,7 @@ func getNowcastCapabilitiesCached(ctx context.Context) ([]byte, error) {
 		contentType = "application/xml"
 	}
 	writeNowcastCache(q, contentType, body)
+	log.Printf("[nowcast/upstream] capabilities done: bytes=%d content-type=%q", len(body), contentType)
 	return body, nil
 }
 
@@ -1841,57 +1938,84 @@ func writeNowcastCache(query string, contentType string, body []byte) {
 }
 
 func fetchAndProcess() {
-	log.Println("Fetching radar GIF...")
+	jobStarted := time.Now()
+	log.Printf("[pipeline] fetch start: url=%s", radarURL)
 
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Get(radarURL)
 	if err != nil {
-		log.Printf("Fetch error: %v", err)
+		log.Printf("[pipeline] fetch error: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Fetch HTTP %d", resp.StatusCode)
+		log.Printf("[pipeline] fetch HTTP %d", resp.StatusCode)
 		return
 	}
+	log.Printf(
+		"[pipeline] fetch response: status=%s content-type=%q content-length=%d",
+		resp.Status,
+		resp.Header.Get("Content-Type"),
+		resp.ContentLength,
+	)
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("Read body error: %v", err)
+		log.Printf("[pipeline] read body error: %v", err)
 		return
 	}
+	log.Printf("[pipeline] download complete: bytes=%d elapsed=%s", len(data), time.Since(jobStarted).Round(time.Millisecond))
 
+	decodeStarted := time.Now()
 	g, err := gif.DecodeAll(bytes.NewReader(data))
 	if err != nil {
-		log.Printf("GIF decode error: %v", err)
+		log.Printf("[pipeline] GIF decode error: %v", err)
 		return
 	}
+	log.Printf(
+		"[pipeline] GIF decoded: frames=%d canvas=%dx%d elapsed=%s",
+		len(g.Image),
+		g.Config.Width,
+		g.Config.Height,
+		time.Since(decodeStarted).Round(time.Millisecond),
+	)
 
+	assetsStarted := time.Now()
 	ref, err := loadReference()
 	if err != nil {
-		log.Printf("Reference load: %v (processing without subtraction)", err)
+		log.Printf("[pipeline] reference load: %v (processing without subtraction)", err)
+	} else {
+		log.Printf("[pipeline] reference loaded")
 	}
 
 	mask, err := loadMask()
 	if err != nil {
-		log.Printf("Mask load: %v (processing without mask)", err)
+		log.Printf("[pipeline] mask load: %v (processing without mask)", err)
+	} else {
+		log.Printf("[pipeline] mask loaded")
 	}
 
 	cityMask, err := loadCityMask()
 	if err != nil {
-		log.Printf("City mask load: %v (processing without city mask)", err)
+		log.Printf("[pipeline] city mask load: %v (processing without city mask)", err)
+	} else {
+		log.Printf("[pipeline] city mask loaded")
 	}
+	log.Printf("[pipeline] assets ready: elapsed=%s", time.Since(assetsStarted).Round(time.Millisecond))
 
 	state.mu.RLock()
 	latestOnly := state.initialLoadDone
 	state.mu.RUnlock()
+	log.Printf("[pipeline] process start: latestOnly=%t", latestOnly)
 
+	processStarted := time.Now()
 	frames := processGIF(g, ref, mask, cityMask, latestOnly)
 	if len(frames) == 0 {
-		log.Println("No frames produced")
+		log.Printf("[pipeline] no frames produced")
 		return
 	}
+	log.Printf("[pipeline] process done: output_frames=%d elapsed=%s", len(frames), time.Since(processStarted).Round(time.Millisecond))
 
 	state.mu.Lock()
 	state.frames = frames
@@ -1900,7 +2024,8 @@ func fetchAndProcess() {
 	state.lastUpdate = time.Now()
 	state.mu.Unlock()
 
-	log.Printf("Processed %d frames", len(frames))
+	log.Printf("[pipeline] state updated: frames=%d canvas=%dx%d", len(frames), g.Config.Width, g.Config.Height)
+	log.Printf("[pipeline] cycle done: total_elapsed=%s", time.Since(jobStarted).Round(time.Millisecond))
 }
 
 func NumberIsFinite(v float64) bool {
@@ -2235,6 +2360,15 @@ func readReferenceGrid(gdalInfoCmd, path string) (refGrid, error) {
 }
 
 func warpFrameThinSpline(srcPNGPath, dstPNGPath string) error {
+	// Страхуемся от запуска из другого cwd/последующей очистки временной папки:
+	// директории для промежуточного и итогового файла должны существовать всегда.
+	if err := os.MkdirAll(tmpWarpDir, 0755); err != nil {
+		return fmt.Errorf("cannot create tmp warp dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dstPNGPath), 0755); err != nil {
+		return fmt.Errorf("cannot create dst warp dir: %w", err)
+	}
+
 	name := strings.TrimSuffix(filepath.Base(srcPNGPath), filepath.Ext(srcPNGPath))
 	tmpPath := filepath.Join(tmpWarpDir, name+"_gcp.tif")
 
@@ -3282,14 +3416,20 @@ func estimateMotionVectors(curr, prev *image.RGBA, infillMask []bool, bounds ima
 }
 
 func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Image, latestOnly bool) []frameInfo {
+	started := time.Now()
 	bounds := image.Rect(0, 0, g.Config.Width, g.Config.Height)
 	batchTime := time.Now()
 	batchID := batchTime.Format("20060102_150405")
+	log.Printf("[process:%s] start: gif_frames=%d latestOnly=%t bounds=%dx%d", batchID, len(g.Image), latestOnly, bounds.Dx(), bounds.Dy())
 
 	var cleanHistory *image.RGBA
 	cityInfillMask := buildCityInfillMask(cityMask, bounds)
+	if cityInfillMask != nil {
+		log.Printf("[process:%s] city infill mask prepared", batchID)
+	}
 
 	// 1) Compose all GIF frames first (respecting disposal rules).
+	stageComposeStart := time.Now()
 	composed := make([]*image.Paletted, len(g.Image))
 	var prev *image.Paletted
 	for i, src := range g.Image {
@@ -3297,8 +3437,10 @@ func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Im
 		composed[i] = frame
 		prev = frame
 	}
+	log.Printf("[process:%s] stage compose done: frames=%d elapsed=%s", batchID, len(composed), time.Since(stageComposeStart).Round(time.Millisecond))
 
 	// 2) Build base precipitation layer without infill (used for motion estimation).
+	stageBaseStart := time.Now()
 	baseFrames := make([]*image.RGBA, len(composed))
 	lightningMasks := make([][]bool, len(composed))
 	for i := range composed {
@@ -3313,8 +3455,10 @@ func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Im
 		lightningMasks[i] = detectLightningGlyphMask(composed[i], prev, next, bounds)
 		baseFrames[i] = subtractReference(composed[i], ref, mask, nil, bounds, nil, nil, nil, nil, nil, nil, nil, nil)
 	}
+	log.Printf("[process:%s] stage base done: frames=%d elapsed=%s", batchID, len(baseFrames), time.Since(stageBaseStart).Round(time.Millisecond))
 
 	// 3) Apply infill (city labels + lightning glyphs) from temporal neighbours.
+	stageInfillStart := time.Now()
 	outFrames := make([]*image.RGBA, len(composed))
 	for i := range composed {
 		infillMask := mergeInfillMasks(cityInfillMask, lightningMasks[i])
@@ -3362,8 +3506,10 @@ func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Im
 		mergeIntoCleanHistory(out, bounds, &cleanHistory)
 		outFrames[i] = out
 	}
+	log.Printf("[process:%s] stage infill done: frames=%d elapsed=%s", batchID, len(outFrames), time.Since(stageInfillStart).Round(time.Millisecond))
 
 	// Global temporal stabilization reduces frame-to-frame flicker outside infill zones.
+	stageStabilizeStart := time.Now()
 	temporalStabilizeFrames(outFrames, 1)
 	// Temporal stabilization may re-introduce short tails under city labels.
 	// Run one more cleanup pass against stabilized neighbors.
@@ -3379,15 +3525,22 @@ func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Im
 		cleanupCityMaskResiduals(outFrames[i], cityInfillMask, prevStable, nextStable)
 	}
 	cleanupConvectiveSpeckles(outFrames)
+	log.Printf("[process:%s] stage stabilize+cleanup done: elapsed=%s", batchID, time.Since(stageStabilizeStart).Round(time.Millisecond))
+
 	metrics := computeFrameBatchMetrics(outFrames)
 	log.Printf(
-		"Frame metrics: coverage=%.4f flicker=%.4f edgeRough=%.4f meanAlpha=%.1f frames=%d",
+		"[process:%s] frame metrics: coverage=%.4f flicker=%.4f edgeRough=%.4f meanAlpha=%.1f frames=%d",
+		batchID,
 		metrics.CoverageMean, metrics.FlickerRate, metrics.EdgeRoughness, metrics.MeanAlpha, metrics.FrameCount,
 	)
 	if metrics.FlickerRate > 0.085 {
-		log.Printf("Frame quality alert: high flicker rate %.4f", metrics.FlickerRate)
+		log.Printf("[process:%s] frame quality alert: high flicker rate %.4f", batchID, metrics.FlickerRate)
 	}
 
+	saveWarpStart := time.Now()
+	savedCount := 0
+	warpedCount := 0
+	skippedUnchanged := 0
 	for i, out := range outFrames {
 		// Fix: Ensure we use the correct batch ID for all frames or per-frame?
 		// The user code had batchID generated once.
@@ -3405,18 +3558,24 @@ func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Im
 			unchanged := state.hasLastFrameHash && state.lastFrameDigest == digest
 			state.mu.RUnlock()
 			if unchanged {
-				log.Printf("Latest GIF frame unchanged, skip save")
+				skippedUnchanged++
+				log.Printf("[process:%s] frame %d unchanged -> skip save", batchID, i)
 				continue
 			}
 		}
 
 		if err := savePNG(path, out); err != nil {
-			log.Printf("Save frame %d: %v", i, err)
+			log.Printf("[process:%s] save frame %d failed: %v", batchID, i, err)
 			continue
 		}
+		savedCount++
+		log.Printf("[process:%s] frame %d saved: %s", batchID, i, path)
 		if thinSplineEnabled {
 			if err := warpFrameThinSpline(path, warpedPath); err != nil {
-				log.Printf("Warp frame %d: %v", i, err)
+				log.Printf("[process:%s] warp frame %d failed: %v", batchID, i, err)
+			} else {
+				warpedCount++
+				log.Printf("[process:%s] frame %d warped: %s", batchID, i, warpedPath)
 			}
 		}
 
@@ -3425,9 +3584,19 @@ func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Im
 		state.hasLastFrameHash = true
 		state.mu.Unlock()
 	}
+	log.Printf(
+		"[process:%s] stage save+warp done: saved=%d warped=%d skipped_unchanged=%d elapsed=%s",
+		batchID,
+		savedCount,
+		warpedCount,
+		skippedUnchanged,
+		time.Since(saveWarpStart).Round(time.Millisecond),
+	)
 
 	cleanupOldFrames()
-	return scanFrames()
+	scanned := scanFrames()
+	log.Printf("[process:%s] done: indexed_frames=%d total_elapsed=%s", batchID, len(scanned), time.Since(started).Round(time.Millisecond))
+	return scanned
 }
 
 func cleanupOldFrames() {

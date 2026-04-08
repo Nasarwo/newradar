@@ -15,9 +15,11 @@ node_modules/
 frames/
 frames_warped/
 tmp_warp/
+cache/
 
 # Editor
 .idea/
 .vscode/
 *.swp
 .DS_Store
+.env
