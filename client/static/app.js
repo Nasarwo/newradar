@@ -94,29 +94,27 @@ let drawCurrentStrokeFeature = null;
 let satelliteWMTSConfig = null;
 const satelliteSourceCache = new Map();
 const PHENOMENA_LEGEND = [
-  { label: "нет явлений", rgb: [230, 230, 230] },
-  { label: "обл. сред. яруса", rgb: [156, 170, 179] },
-  { label: "сл. образования", rgb: [162, 198, 254] },
-  { label: "осадки слабые", rgb: [70, 254, 149] },
-  { label: "осадки умеренные", rgb: [1, 194, 94] },
-  { label: "осадки сильные", rgb: [1, 154, 8] },
-  { label: "кучевая обл", rgb: [255, 255, 131] },
-  { label: "ливень слабый", rgb: [62, 137, 253] },
-  { label: "ливень умеренный", rgb: [1, 58, 255] },
-  { label: "ливень сильный", rgb: [2, 8, 119] },
-  { label: "гроза (R)", rgb: [255, 171, 128] },
-  { label: "гроза R)", rgb: [255, 89, 132] },
-  { label: "гроза R", rgb: [253, 6, 9] },
-  { label: "град слабый", rgb: [205, 105, 8] },
-  { label: "град умеренный", rgb: [143, 73, 15] },
-  { label: "град сильный", rgb: [88, 14, 8] },
-  { label: "шквал слабый", rgb: [255, 171, 255] },
-  { label: "шквал умеренный", rgb: [255, 88, 255] },
-  { label: "шквал сильный", rgb: [200, 9, 202] },
-  { label: "смерч", rgb: [47, 49, 73] },
+  { label: "Обл. сред. яруса", rgb: [156, 170, 179] },
+  { label: "Сл. образования", rgb: [162, 198, 254] },
+  { label: "Осадки слабые", rgb: [70, 254, 149] },
+  { label: "Осадки умеренные", rgb: [1, 194, 94] },
+  { label: "Осадки сильные", rgb: [1, 154, 8] },
+  { label: "Кучевая обл", rgb: [255, 255, 131] },
+  { label: "Ливень слабый", rgb: [62, 137, 253] },
+  { label: "Ливень умеренный", rgb: [1, 58, 255] },
+  { label: "Ливень сильный", rgb: [2, 8, 119] },
+  { label: "Гроза (R)", rgb: [255, 171, 128] },
+  { label: "Гроза R", rgb: [255, 89, 132] },
+  { label: "Гроза R+", rgb: [253, 6, 9] },
+  { label: "Град слабый", rgb: [205, 105, 8] },
+  { label: "Град умеренный", rgb: [143, 73, 15] },
+  { label: "Град сильный", rgb: [88, 14, 8] },
+  { label: "Шквал слабый", rgb: [255, 171, 255] },
+  { label: "Шквал умеренный", rgb: [255, 88, 255] },
+  { label: "Шквал сильный", rgb: [200, 9, 202] },
+  { label: "Смерч", rgb: [47, 49, 73] },
 ];
 const HEIGHT_LEGEND = [
-  { label: "нет эхо", rgb: [230, 230, 230] },
   { label: "0.00 км", rgb: [112, 232, 179] },
   { label: "0.20 км", rgb: [112, 232, 183] },
   { label: "0.50 км", rgb: [104, 214, 176] },
@@ -137,7 +135,6 @@ const HEIGHT_LEGEND = [
   { label: "15.00 км", rgb: [216, 110, 192] },
 ];
 const DBZ_LEGEND = [
-  { label: "empty", rgb: [230, 230, 230] },
   { label: "-30 dBZ", rgb: [215, 215, 215] },
   { label: "-10 dBZ", rgb: [200, 200, 200] },
   { label: "-5 dBZ", rgb: [179, 210, 234] },
@@ -158,7 +155,6 @@ const DBZ_LEGEND = [
   { label: "70 dBZ", rgb: [142, 76, 76] },
 ];
 const PRECIP_LEGEND = [
-  { label: "нет осадков", rgb: [230, 230, 230] },
   { label: "0.10 мм/ч", rgb: [185, 185, 185] },
   { label: "0.30 мм/ч", rgb: [143, 143, 143] },
   { label: "0.50 мм/ч", rgb: [90, 135, 232] },
@@ -293,24 +289,46 @@ function getLegendConfigForSource(sourceKey) {
 function renderActiveLegend() {
   if (!legendRowsEl) return;
   if (activeSource === SOURCE_SATELLITE) {
-    if (legendTitleTextEl) legendTitleTextEl.textContent = "Легенда: спутник";
+    if (legendTitleTextEl) {
+      legendTitleTextEl.textContent = satelliteRadiationColorEnabled
+        ? "Легенда: спутник (Tрад и примерная ВГО)"
+        : "Легенда: спутник";
+    }
     legendRowsEl.innerHTML = "";
-    const row = document.createElement("tr");
-    const colorCell = document.createElement("td");
-    const textCell = document.createElement("td");
-    const swatch = document.createElement("span");
-    swatch.className = "palette-color";
-    swatch.style.background = "#d0d7de";
-    colorCell.appendChild(swatch);
-    textCell.textContent = "для спутника легенда осадков не применяется";
-    row.appendChild(colorCell);
-    row.appendChild(textCell);
-    legendRowsEl.appendChild(row);
+    if (satelliteRadiationColorEnabled) {
+      for (const stop of SATELLITE_CTA_STOPS) {
+        const row = document.createElement("tr");
+        const colorCell = document.createElement("td");
+        const textCell = document.createElement("td");
+        const swatch = document.createElement("span");
+        const hKm = estimateCloudTopHeightKmByBt(stop.t);
+        swatch.className = "palette-color";
+        swatch.style.background = `rgb(${stop.rgb[0]}, ${stop.rgb[1]}, ${stop.rgb[2]})`;
+        colorCell.appendChild(swatch);
+        textCell.textContent = `${stop.t.toFixed(0)}°C -> ~${hKm.toFixed(1)} км`;
+        row.appendChild(colorCell);
+        row.appendChild(textCell);
+        legendRowsEl.appendChild(row);
+      }
+    } else {
+      const row = document.createElement("tr");
+      const colorCell = document.createElement("td");
+      const textCell = document.createElement("td");
+      const swatch = document.createElement("span");
+      swatch.className = "palette-color";
+      swatch.style.background = "#d0d7de";
+      colorCell.appendChild(swatch);
+      textCell.textContent =
+        "Включите \"Цвет по радиационной температуре\" для легенды Tрад и ВГО.";
+      row.appendChild(colorCell);
+      row.appendChild(textCell);
+      legendRowsEl.appendChild(row);
+    }
     return;
   }
 
   const cfg = getLegendConfigForSource(activeSource);
-  if (legendTitleTextEl) legendTitleTextEl.textContent = `Легенда: ${cfg.title}`;
+  if (legendTitleTextEl) legendTitleTextEl.textContent = `Легенда`;
   legendRowsEl.innerHTML = "";
   for (const item of cfg.items) {
     const row = document.createElement("tr");
@@ -381,6 +399,56 @@ function ctaLikeRgbByBt(bt) {
     return lerpColor(prev.rgb, next.rgb, k);
   }
   return last.rgb;
+}
+
+function estimateCloudTopHeightKmByBt(btC) {
+  // Кусочно-линейная эмпирическая привязка "радиационная температура -> ВГО":
+  // сохраняет попадание в малых высотах и расширяет верхний диапазон до ~16 км.
+  const bt = Number(btC);
+  if (!Number.isFinite(bt)) return 0;
+  if (bt >= -20) return 0;
+  if (bt >= -55) {
+    // -20..-55 C -> 0..6 км (лучше совпадает с "низами").
+    return ((-20 - bt) / 35) * 6;
+  }
+  if (bt >= -85) {
+    // -55..-85 C -> 6..16 км (подтягиваем "верха").
+    return 6 + ((-55 - bt) / 30) * 10;
+  }
+  return 16;
+}
+
+function estimateBtBySatelliteColor(r, g, b) {
+  const c = [r, g, b];
+  let bestBt = SATELLITE_CTA_STOPS[0].t;
+  let bestDist = Infinity;
+  for (let i = 1; i < SATELLITE_CTA_STOPS.length; i++) {
+    const prev = SATELLITE_CTA_STOPS[i - 1];
+    const next = SATELLITE_CTA_STOPS[i];
+    const seg = [
+      next.rgb[0] - prev.rgb[0],
+      next.rgb[1] - prev.rgb[1],
+      next.rgb[2] - prev.rgb[2],
+    ];
+    const segLen2 = seg[0] * seg[0] + seg[1] * seg[1] + seg[2] * seg[2];
+    let t = 0;
+    if (segLen2 > 0) {
+      const rel = [c[0] - prev.rgb[0], c[1] - prev.rgb[1], c[2] - prev.rgb[2]];
+      t = clamp01((rel[0] * seg[0] + rel[1] * seg[1] + rel[2] * seg[2]) / segLen2);
+    }
+    const pr = prev.rgb[0] + seg[0] * t;
+    const pg = prev.rgb[1] + seg[1] * t;
+    const pb = prev.rgb[2] + seg[2] * t;
+    const dr = c[0] - pr;
+    const dg = c[1] - pg;
+    const db = c[2] - pb;
+    const dist = dr * dr + dg * dg + db * db;
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestBt = prev.t + (next.t - prev.t) * t;
+    }
+  }
+  return bestBt;
 }
 
 async function styleSatelliteTileCTA(blob) {
@@ -1161,10 +1229,6 @@ async function getStyledFrameUrl(url) {
 async function inspectPrecipAtCrosshairCenter() {
   if (!crosshairMode) return;
   if (!map || !frames.length) return;
-  if (activeSource === SOURCE_SATELLITE) {
-    setPrecipInfo("В перекрестии: спутниковый слой");
-    return;
-  }
   const frame = frames[currentFrame];
   if (!frame?.url) return;
   const probeToken = ++centerProbeToken;
@@ -1205,6 +1269,20 @@ async function inspectPrecipAtCrosshairCenter() {
     const g = px.data[i + 1];
     const b = px.data[i + 2];
     const a = px.data[i + 3];
+    if (activeSource === SOURCE_SATELLITE) {
+      if (a <= 2) {
+        setPrecipInfo("В перекрестии: прозрачный пиксель спутника");
+        return;
+      }
+      const bt = satelliteRadiationColorEnabled
+        ? estimateBtBySatelliteColor(r, g, b)
+        : pseudoBtCByLuma(0.2126 * r + 0.7152 * g + 0.0722 * b);
+      const hKm = estimateCloudTopHeightKmByBt(bt);
+      setPrecipInfo(
+        `В перекрестии: Tрад ~ ${bt.toFixed(1)}°C; ВГО ~ ${hKm.toFixed(1)} км`,
+      );
+      return;
+    }
     const label = getLegendLabelByRgb(activeSource, r, g, b, a);
     if (!label) {
       setPrecipInfo(`В перекрестии: неопределено (RGB ${r},${g},${b})`);
@@ -1311,12 +1389,12 @@ async function loadNowcastFrames(layerName) {
     north: String(north),
     limit: String(limit),
   });
-  setStatus(`Загрузка nowcast-кадров (${layer})...`);
+  setStatus(`Загрузка (${layer})...`);
   const response = await fetch(`/api/nowcast/frames?${params.toString()}`, {
     cache: "no-store",
   });
   if (!response.ok) {
-    throw new Error(`Nowcast frames HTTP ${response.status}`);
+    throw new Error(`Radar frames HTTP ${response.status}`);
   }
   const payload = await response.json();
   const sourceFrames = Array.isArray(payload?.frames) ? payload.frames : [];
@@ -1338,13 +1416,13 @@ async function loadNowcastFrames(layerName) {
   for (let i = 0; i < normalizedRaw.length; i++) {
     const f = normalizedRaw[i];
     setStatus(
-      `Подготовка nowcast (${layer}): ${i + 1}/${normalizedRaw.length}`,
+      `Подготовка (${layer}): ${i + 1}/${normalizedRaw.length}`,
     );
     try {
       const localUrl = await getNowcastBlobUrlCached(f.sourceUrl);
       normalized.push({ ...f, url: localUrl });
     } catch (e) {
-      console.warn("Nowcast frame preload failed, keep source URL:", e);
+      console.warn("Frame preload failed, keep source URL:", e);
       normalized.push(f);
     }
   }
@@ -1358,7 +1436,7 @@ async function loadSatelliteFrames() {
     limit: String(SATELLITE_FRAME_LIMIT),
     cadenceMin: String(SATELLITE_CADENCE_MIN),
   });
-  setStatus("Загрузка спутниковых кадров EUMETView...");
+  setStatus("Загрузка спутниковых кадров...");
   const response = await fetch(`/api/satellite/frames?${params.toString()}`, {
     cache: "no-store",
   });
@@ -1400,7 +1478,7 @@ async function getNowcastBlobUrlCached(sourceUrl) {
   }
   const response = await fetch(sourceUrl, { cache: "force-cache" });
   if (!response.ok) {
-    throw new Error(`Nowcast frame HTTP ${response.status}`);
+    throw new Error(`Frame HTTP ${response.status}`);
   }
   const blob = await response.blob();
   const cleanedBlob = await removeNowcastRadarBackground(blob);
@@ -1564,7 +1642,7 @@ async function removeNowcastRadarBackground(blob) {
     canvas.toBlob(
       (out) => {
         if (!out) {
-          reject(new Error("Nowcast background cleanup failed"));
+          reject(new Error("Frame background cleanup failed"));
           return;
         }
         resolve(out);
@@ -1628,7 +1706,7 @@ async function switchSource(layerOrHd) {
 
   const nowcastFrames = await loadNowcastFrames(next);
   if (!nowcastFrames.length) {
-    setStatus(`Nowcast слой ${next}: кадры недоступны`);
+    setStatus(`4x4 слой ${next}: кадры недоступны`);
     return;
   }
   activeSource = next;
@@ -1779,7 +1857,7 @@ function bindControls() {
     if (activeSource !== SOURCE_HD) {
       nowcastFramesByLayer.delete(activeSource);
       switchSource(activeSource).catch((e) => {
-        console.warn("Nowcast reload after playback limit change failed:", e);
+        console.warn("Layer reload after playback limit change failed:", e);
       });
       return;
     }
@@ -1897,7 +1975,7 @@ async function init() {
       await loadNowcastMeta();
       rebuildSourceOptions();
     } catch (e) {
-      console.warn("Nowcast meta load failed:", e);
+      console.warn("4x4 meta load failed:", e);
     }
     updateSatelliteStylePanelVisibility();
     setStatus(`Готово. Радаров: ${radars.length}`);
