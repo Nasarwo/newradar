@@ -49,16 +49,19 @@ const nextBtnEl = document.getElementById("nextBtn");
 const measureBtnEl = document.getElementById("measureBtn");
 const drawBtnEl = document.getElementById("drawBtn");
 const crosshairBtnEl = document.getElementById("crosshairBtn");
+const lightningToggleBtnEl = document.getElementById("lightningToggleBtn");
 const playbackFrameCountEl = document.getElementById("playbackFrameCount");
 const sourceLayerSelectEl = document.getElementById("sourceLayerSelect");
 const satelliteStylePanelEl = document.getElementById("satelliteStylePanel");
-const satelliteTempColorToggleEl = document.getElementById("satelliteTempColor");
+const satelliteTempColorToggleEl =
+  document.getElementById("satelliteTempColor");
 const legendPanelEl = document.getElementById("legendPanel");
 const legendToggleEl = document.getElementById("legendToggle");
 const legendTitleTextEl = document.getElementById("legendTitleText");
 const legendRowsEl = document.getElementById("legendRows");
 const mapCrosshairEl = document.getElementById("mapCrosshair");
 const crosshairInfoEl = document.getElementById("crosshairInfo");
+const lightningPopupEl = document.getElementById("lightningPopup");
 
 let map;
 let baseLayer;
@@ -68,6 +71,8 @@ let radarLayer;
 let satelliteReferenceLayer;
 let measureLayer;
 let drawLayer;
+let lightningLayer;
+let lightningPopupOverlay;
 let frames = [];
 let hdFrames = [];
 let activeSource = SOURCE_HD;
@@ -75,6 +80,7 @@ let satelliteResolvedLayer = "";
 let radarImageSize = [0, 0];
 let nowcastMeta = null;
 const nowcastFramesByLayer = new Map();
+const satelliteFramesByKey = new Map();
 let geoBounds = DEFAULT_GEO_BOUNDS.slice();
 let geoBounds3857 = null;
 let radars = [];
@@ -86,6 +92,8 @@ let dataRefreshTimer = null;
 let measureMode = false;
 let drawMode = false;
 let crosshairMode = false;
+let lightningOverlayEnabled = true;
+let lightningRequestToken = 0;
 let measureStart = null;
 let measureEnd = null;
 let measurePointer = null;
@@ -170,11 +178,34 @@ const PRECIP_LEGEND = [
   { label: ">100 мм/ч", rgb: [203, 79, 209] },
 ];
 const LEGEND_CONFIG_BY_SOURCE = {
-  [SOURCE_HD]: { title: "Опасные явления HD", items: PHENOMENA_LEGEND, maxDist: 70 },
-  bufr_phenomena: { title: "Опасные явления", items: PHENOMENA_LEGEND, maxDist: 70 },
-  bufr_height: { title: "Высота ВГО", items: HEIGHT_LEGEND, maxDist: 70, forceNearest: true },
-  bufr_dbz1: { title: "Отражаемость (dBZ)", items: DBZ_LEGEND, maxDist: 70, forceNearest: true },
-  bufr_precip: { title: "Интенсивность", items: PRECIP_LEGEND, maxDist: 70, forceNearest: true },
+  [SOURCE_HD]: {
+    title: "Опасные явления HD",
+    items: PHENOMENA_LEGEND,
+    maxDist: 70,
+  },
+  bufr_phenomena: {
+    title: "Опасные явления",
+    items: PHENOMENA_LEGEND,
+    maxDist: 70,
+  },
+  bufr_height: {
+    title: "Высота ВГО",
+    items: HEIGHT_LEGEND,
+    maxDist: 70,
+    forceNearest: true,
+  },
+  bufr_dbz1: {
+    title: "Отражаемость (dBZ)",
+    items: DBZ_LEGEND,
+    maxDist: 70,
+    forceNearest: true,
+  },
+  bufr_precip: {
+    title: "Интенсивность",
+    items: PRECIP_LEGEND,
+    maxDist: 70,
+    forceNearest: true,
+  },
 };
 const PHENOMENA_MATCH_MAX_DIST = 70;
 const SHOWER_MATCH_MAX_DIST = 130;
@@ -236,6 +267,7 @@ function clearSatelliteStyleCaches() {
   satelliteTileStyleCache.clear();
   satelliteTileStyleOrder.length = 0;
   satelliteSourceCache.clear();
+  satelliteFramesByKey.clear();
 }
 
 function getNearestLegendColorInfo(r, g, b) {
@@ -270,7 +302,8 @@ function setCrosshairMode(enabled) {
   crosshairMode = Boolean(enabled);
   if (crosshairBtnEl) crosshairBtnEl.classList.toggle("active", crosshairMode);
   if (mapCrosshairEl) mapCrosshairEl.classList.toggle("hidden", !crosshairMode);
-  if (crosshairInfoEl) crosshairInfoEl.classList.toggle("hidden", !crosshairMode);
+  if (crosshairInfoEl)
+    crosshairInfoEl.classList.toggle("hidden", !crosshairMode);
   if (crosshairMode) {
     inspectPrecipAtCrosshairCenter().catch(() => {});
   }
@@ -283,7 +316,9 @@ function getSourceDisplayName(sourceKey) {
 }
 
 function getLegendConfigForSource(sourceKey) {
-  return LEGEND_CONFIG_BY_SOURCE[sourceKey] || LEGEND_CONFIG_BY_SOURCE[SOURCE_HD];
+  return (
+    LEGEND_CONFIG_BY_SOURCE[sourceKey] || LEGEND_CONFIG_BY_SOURCE[SOURCE_HD]
+  );
 }
 
 function renderActiveLegend() {
@@ -319,7 +354,7 @@ function renderActiveLegend() {
       swatch.style.background = "#d0d7de";
       colorCell.appendChild(swatch);
       textCell.textContent =
-        "Включите \"Цвет по радиационной температуре\" для легенды Tрад и ВГО.";
+        'Включите "Цвет по радиационной температуре" для легенды Tрад и ВГО.';
       row.appendChild(colorCell);
       row.appendChild(textCell);
       legendRowsEl.appendChild(row);
@@ -402,20 +437,25 @@ function ctaLikeRgbByBt(bt) {
 }
 
 function estimateCloudTopHeightKmByBt(btC) {
-  // Кусочно-линейная эмпирическая привязка "радиационная температура -> ВГО":
-  // сохраняет попадание в малых высотах и расширяет верхний диапазон до ~16 км.
+  // Более физичная и плавная оценка по стандартной атмосфере (ISA):
+  // тропосфера ~6.5 C/км до тропопаузы (~11 км, -56.5 C),
+  // выше — консервативное наращивание (ИК-температура не равна T воздуха 1:1).
   const bt = Number(btC);
   if (!Number.isFinite(bt)) return 0;
-  if (bt >= -20) return 0;
-  if (bt >= -55) {
-    // -20..-55 C -> 0..6 км (лучше совпадает с "низами").
-    return ((-20 - bt) / 35) * 6;
+  if (bt >= 15) return 0;
+  if (bt >= -56.5) {
+    return Math.max(0, (15 - bt) / 6.5);
   }
-  if (bt >= -85) {
-    // -55..-85 C -> 6..16 км (подтягиваем "верха").
-    return 6 + ((-55 - bt) / 30) * 10;
+  if (bt >= -70) {
+    return 11 + ((-56.5 - bt) / 13.5) * 1.8; // 11..12.8 км
   }
-  return 16;
+  if (bt >= -80) {
+    return 12.8 + ((-70 - bt) / 10) * 1.4; // 12.8..14.2 км
+  }
+  if (bt >= -90) {
+    return 14.2 + ((-80 - bt) / 10) * 1.3; // 14.2..15.5 км
+  }
+  return 15.5;
 }
 
 function estimateBtBySatelliteColor(r, g, b) {
@@ -434,7 +474,9 @@ function estimateBtBySatelliteColor(r, g, b) {
     let t = 0;
     if (segLen2 > 0) {
       const rel = [c[0] - prev.rgb[0], c[1] - prev.rgb[1], c[2] - prev.rgb[2]];
-      t = clamp01((rel[0] * seg[0] + rel[1] * seg[1] + rel[2] * seg[2]) / segLen2);
+      t = clamp01(
+        (rel[0] * seg[0] + rel[1] * seg[1] + rel[2] * seg[2]) / segLen2,
+      );
     }
     const pr = prev.rgb[0] + seg[0] * t;
     const pg = prev.rgb[1] + seg[1] * t;
@@ -516,7 +558,10 @@ function floorToTenMinutesUTC(date) {
   return d;
 }
 
-function getRecentSatelliteTimes(limit = SATELLITE_FRAME_LIMIT, stepMinutes = 10) {
+function getRecentSatelliteTimes(
+  limit = SATELLITE_FRAME_LIMIT,
+  stepMinutes = 10,
+) {
   const out = [];
   const now = floorToTenMinutesUTC(new Date());
   for (let i = limit - 1; i >= 0; i--) {
@@ -546,7 +591,9 @@ async function isWorkingSatelliteWMTS(layerId, matrixSet, timeIso) {
       credentials: "omit",
     });
     if (!response.ok) return false;
-    const contentType = (response.headers.get("content-type") || "").toLowerCase();
+    const contentType = (
+      response.headers.get("content-type") || ""
+    ).toLowerCase();
     return contentType.includes("image/");
   } catch {
     return false;
@@ -590,7 +637,10 @@ function getSatelliteTileSource(urlTemplate) {
         return;
       }
       try {
-        const response = await fetch(src, { cache: "force-cache", mode: "cors" });
+        const response = await fetch(src, {
+          cache: "force-cache",
+          mode: "cors",
+        });
         if (!response.ok) {
           img.src = src;
           return;
@@ -687,7 +737,9 @@ async function tickPlayback(generation) {
 function getPlaybackDelayMs(frameIdx, lastIdx) {
   const isLast = frameIdx === lastIdx;
   if (activeSource === SOURCE_SATELLITE) {
-    return isLast ? SATELLITE_FRAME_LAST_HOLD_MS : SATELLITE_FRAME_FAST_INTERVAL_MS;
+    return isLast
+      ? SATELLITE_FRAME_LAST_HOLD_MS
+      : SATELLITE_FRAME_FAST_INTERVAL_MS;
   }
   return isLast ? FRAME_LAST_HOLD_MS : FRAME_FAST_INTERVAL_MS;
 }
@@ -864,6 +916,22 @@ function createMap() {
   });
   map.addLayer(drawLayer);
 
+  lightningLayer = new ol.layer.Vector({
+    source: new ol.source.Vector(),
+    visible: lightningOverlayEnabled,
+    zIndex: 30,
+  });
+  map.addLayer(lightningLayer);
+  if (lightningPopupEl) {
+    lightningPopupOverlay = new ol.Overlay({
+      element: lightningPopupEl,
+      positioning: "bottom-center",
+      offset: [0, -10],
+      stopEvent: false,
+    });
+    map.addOverlay(lightningPopupOverlay);
+  }
+
   const extent3857 = ol.proj.transformExtent(
     geoBounds,
     "EPSG:4326",
@@ -894,6 +962,7 @@ function createMap() {
   });
   map.on("moveend", () => {
     inspectPrecipAtCrosshairCenter().catch(() => {});
+    refreshLightningOverlay().catch(() => {});
   });
 
   map.on("pointerdown", (event) => {
@@ -910,7 +979,11 @@ function createMap() {
 
   map.on("singleclick", (event) => {
     if (drawMode) return;
-    if (!measureMode) return;
+    if (handleLightningFeatureClick(event)) return;
+    if (!measureMode) {
+      hideLightningPopup();
+      return;
+    }
     if (!measureStart) {
       measureStart = event.coordinate.slice();
       measureEnd = null;
@@ -941,7 +1014,12 @@ function renderNowcastPixelGapOverlay(event) {
   if (!NOWCAST_PIXEL_GAP_OVERLAY) return;
   if (!map || activeSource === SOURCE_SATELLITE) return;
   const frame = frames[currentFrame];
-  if (!frame || !Array.isArray(frame.imageExtent) || frame.imageExtent.length !== 4) return;
+  if (
+    !frame ||
+    !Array.isArray(frame.imageExtent) ||
+    frame.imageExtent.length !== 4
+  )
+    return;
   const width = Number(frame.imageWidth || radarImageSize?.[0] || 0);
   const height = Number(frame.imageHeight || radarImageSize?.[1] || 0);
   if (!(width > 1 && height > 1)) return;
@@ -961,9 +1039,14 @@ function renderNowcastPixelGapOverlay(event) {
   const pixelStepXCss = renderWidthCss / width;
   const pixelStepYCss = renderHeightCss / height;
   const minStepCss = Math.min(pixelStepXCss, pixelStepYCss);
-  if (!Number.isFinite(minStepCss) || minStepCss < NOWCAST_PIXEL_GAP_MIN_SCREEN_PX) return;
+  if (
+    !Number.isFinite(minStepCss) ||
+    minStepCss < NOWCAST_PIXEL_GAP_MIN_SCREEN_PX
+  )
+    return;
 
-  const pixelRatio = event?.frameState?.pixelRatio || window.devicePixelRatio || 1;
+  const pixelRatio =
+    event?.frameState?.pixelRatio || window.devicePixelRatio || 1;
   const gapWidthCss = Math.max(
     0.35,
     Math.min(NOWCAST_PIXEL_GAP_MAX_SCREEN_PX, minStepCss * 0.16),
@@ -1065,6 +1148,160 @@ function upsertRadarLayer() {
   map.addLayer(radarLayer);
 }
 
+function getLightningViewBBox4326() {
+  if (!map) return null;
+  const size = map.getSize?.();
+  if (!Array.isArray(size) || size.length < 2) return null;
+  const extent3857 = map.getView()?.calculateExtent?.(size);
+  if (!Array.isArray(extent3857) || extent3857.length < 4) return null;
+  const extent4326 = ol.proj.transformExtent(extent3857, "EPSG:3857", "EPSG:4326");
+  if (!Array.isArray(extent4326) || extent4326.length < 4) return null;
+  return extent4326;
+}
+
+function hideLightningPopup() {
+  lightningPopupOverlay?.setPosition?.(undefined);
+  lightningPopupEl?.classList?.add("hidden");
+}
+
+function showLightningPopup(coordinate, strikeTime, ageMinutes) {
+  if (!lightningPopupEl || !lightningPopupOverlay || !Array.isArray(coordinate))
+    return;
+  const parsed = Date.parse(strikeTime || "");
+  const localText = Number.isFinite(parsed)
+    ? new Date(parsed).toLocaleString("ru-RU")
+    : String(strikeTime || "неизвестно");
+  const ageText = Number.isFinite(ageMinutes)
+    ? ` (${Math.round(ageMinutes)} мин назад)`
+    : "";
+  lightningPopupEl.textContent = `⚡ ${localText}${ageText}`;
+  lightningPopupEl.classList.remove("hidden");
+  lightningPopupOverlay.setPosition(coordinate);
+}
+
+function handleLightningFeatureClick(event) {
+  if (!map || !lightningOverlayEnabled || !lightningLayer?.getVisible?.()) return false;
+  let picked = null;
+  map.forEachFeatureAtPixel(
+    event.pixel,
+    (feature, layer) => {
+      if (layer !== lightningLayer) return undefined;
+      picked = feature;
+      return feature;
+    },
+    { hitTolerance: 8 },
+  );
+  if (!picked) return false;
+  const coordinate = picked.getGeometry?.()?.getCoordinates?.();
+  showLightningPopup(coordinate, picked.get("strikeTime"), picked.get("ageMinutes"));
+  return true;
+}
+
+function clearLightningLayer() {
+  lightningLayer?.getSource?.()?.clear();
+  hideLightningPopup();
+}
+
+function getLightningPointStyleByAge(ageMinutes) {
+  const clamped = Math.max(0, Math.min(60, Number(ageMinutes) || 0));
+  const alpha = Math.max(0.28, 1 - clamped / 70);
+  const radius = clamped <= 5 ? 6.2 : clamped <= 15 ? 5.2 : 4.2;
+  const fill =
+    clamped <= 10
+      ? `rgba(255, 237, 64, ${alpha.toFixed(3)})`
+      : `rgba(255, 173, 42, ${alpha.toFixed(3)})`;
+  return new ol.style.Style({
+    image: new ol.style.Circle({
+      radius,
+      fill: new ol.style.Fill({ color: fill }),
+      stroke: new ol.style.Stroke({
+        color: `rgba(20,20,20,${Math.min(0.95, alpha + 0.35).toFixed(3)})`,
+        width: 1.2,
+      }),
+    }),
+  });
+}
+
+function renderLightningStrikes(strikes) {
+  const source = lightningLayer?.getSource?.();
+  if (!source) return;
+  source.clear();
+  if (!Array.isArray(strikes) || !strikes.length) return;
+  const nowMs = Date.now();
+  const features = [];
+  for (const s of strikes) {
+    const lat = Number(s.lat);
+    const lon = Number(s.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const tMs = Date.parse(s.time || "");
+    const ageMin = Number.isFinite(tMs) ? Math.max(0, (nowMs - tMs) / 60000) : 999;
+    const feature = new ol.Feature({
+      geometry: new ol.geom.Point(ol.proj.fromLonLat([lon, lat])),
+    });
+    feature.set("ageMinutes", ageMin);
+    feature.set("strikeTime", s.time || "");
+    feature.setStyle(getLightningPointStyleByAge(ageMin));
+    features.push(feature);
+  }
+  if (features.length) source.addFeatures(features);
+}
+
+async function refreshLightningOverlay() {
+  if (!lightningOverlayEnabled) {
+    clearLightningLayer();
+    return;
+  }
+  const reqToken = ++lightningRequestToken;
+  const bbox = getLightningViewBBox4326();
+  const params = new URLSearchParams();
+  params.set("minutes", "60");
+  params.set("limit", "8000");
+  params.set("stations", "GLD2NE,GLD3N,GLD4S,MTG1");
+  const withBBox = new URLSearchParams(params);
+  if (bbox) {
+    withBBox.set("west", String(bbox[0]));
+    withBBox.set("south", String(bbox[1]));
+    withBBox.set("east", String(bbox[2]));
+    withBBox.set("north", String(bbox[3]));
+  }
+  try {
+    const resp = await fetch(`/api/lightning/gld360/latest?${withBBox.toString()}`, {
+      cache: "no-store",
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const payload = await resp.json();
+    if (reqToken !== lightningRequestToken) return;
+    const first = Array.isArray(payload?.strikes) ? payload.strikes : [];
+    if (first.length > 0) {
+      renderLightningStrikes(first);
+      return;
+    }
+    // Fallback: if local bbox has no strikes, fetch wider area.
+    const respWide = await fetch(`/api/lightning/gld360/latest?${params.toString()}`, {
+      cache: "no-store",
+    });
+    if (!respWide.ok) throw new Error(`HTTP ${respWide.status}`);
+    const payloadWide = await respWide.json();
+    if (reqToken !== lightningRequestToken) return;
+    renderLightningStrikes(payloadWide?.strikes || []);
+  } catch (e) {
+    if (reqToken !== lightningRequestToken) return;
+    console.warn("Lightning overlay refresh failed:", e);
+    clearLightningLayer();
+  }
+}
+
+function setLightningOverlayEnabled(enabled) {
+  lightningOverlayEnabled = Boolean(enabled);
+  lightningToggleBtnEl?.classList.toggle("active", lightningOverlayEnabled);
+  lightningLayer?.setVisible(lightningOverlayEnabled);
+  if (!lightningOverlayEnabled) {
+    clearLightningLayer();
+    return;
+  }
+  refreshLightningOverlay().catch(() => {});
+}
+
 function setFrameExtentAndUrl(extent, url, projection, interpolate = false) {
   frameLayer.setSource(
     new ol.source.ImageStatic({
@@ -1077,27 +1314,96 @@ function setFrameExtentAndUrl(extent, url, projection, interpolate = false) {
   );
 }
 
+function getDbzLabelValue(label) {
+  const match = String(label || "").match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const value = Number(match[0]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function classifyDbzGreenCluster(r, g, b, items) {
+  const lowBand = [];
+  const highBand = [];
+  for (const item of items) {
+    const v = getDbzLabelValue(item.label);
+    if (v === 0 || v === 5) {
+      lowBand.push(item);
+    } else if (v === 50 || v === 55) {
+      highBand.push(item);
+    }
+  }
+  if (!lowBand.length || !highBand.length) return null;
+
+  const nearest = (group) => {
+    let best = group[0];
+    let bestDist = Infinity;
+    for (const p of group) {
+      const dr = r - p.rgb[0];
+      const dg = g - p.rgb[1];
+      const db = b - p.rgb[2];
+      const dist = dr * dr + dg * dg + db * db;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = p;
+      }
+    }
+    return { item: best, distSq: bestDist };
+  };
+
+  const low = nearest(lowBand);
+  const high = nearest(highBand);
+  // Для зелёного кластера в nowcast 0/5 dBZ заметно светлее, чем 50/55 dBZ.
+  const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  if (Math.abs(low.distSq - high.distSq) <= 26 * 26) {
+    return luma >= 186 ? low.item.label : high.item.label;
+  }
+  return low.distSq <= high.distSq ? low.item.label : high.item.label;
+}
+
 function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
   const cfg = getLegendConfigForSource(sourceKey);
   const items = cfg?.items || [];
   if (!items.length) return null;
   if (alpha === 0) return items[0].label;
-  if ((sourceKey === "bufr_height" || sourceKey === "bufr_dbz1" || sourceKey === "bufr_precip") && alpha < 24) {
+  if (
+    (sourceKey === "bufr_height" ||
+      sourceKey === "bufr_dbz1" ||
+      sourceKey === "bufr_precip") &&
+    alpha < 24
+  ) {
     return items[0].label;
   }
 
   let best = items[0];
   let bestDist = Infinity;
+  let second = items[0];
+  let secondDist = Infinity;
   for (const p of items) {
     const dr = r - p.rgb[0];
     const dg = g - p.rgb[1];
     const db = b - p.rgb[2];
     const dist = Math.sqrt(dr * dr + dg * dg + db * db);
     if (dist < bestDist) {
+      secondDist = bestDist;
+      second = best;
       bestDist = dist;
       best = p;
+    } else if (dist < secondDist) {
+      secondDist = dist;
+      second = p;
     }
   }
+
+  if (sourceKey === "bufr_dbz1") {
+    const bestVal = getDbzLabelValue(best.label);
+    const secondVal = getDbzLabelValue(second.label);
+    const isGreenAmbiguous = (v) => v === 0 || v === 5 || v === 50 || v === 55;
+    if (isGreenAmbiguous(bestVal) || isGreenAmbiguous(secondVal)) {
+      const fixed = classifyDbzGreenCluster(r, g, b, items);
+      if (fixed) return fixed;
+    }
+  }
+
   if (bestDist <= (cfg?.maxDist || PHENOMENA_MATCH_MAX_DIST)) return best.label;
   if (cfg?.forceNearest) return best.label;
 
@@ -1198,7 +1504,11 @@ async function getStyledFrameUrl(url) {
         const r = out.data[i];
         const g = out.data[i + 1];
         const b = out.data[i + 2];
-        const { best, bestDist, secondDist } = getNearestLegendColorInfo(r, g, b);
+        const { best, bestDist, secondDist } = getNearestLegendColorInfo(
+          r,
+          g,
+          b,
+        );
         if (
           bestDist <= DISPLAY_SNAP_MAX_DIST_SQ &&
           secondDist - bestDist >= DISPLAY_SNAP_MIN_GAP_SQ
@@ -1258,7 +1568,9 @@ async function inspectPrecipAtCrosshairCenter() {
     if (!(east > west && north > south)) return;
 
     const x = Math.round(((coordX - west) / (east - west)) * (px.width - 1));
-    const y = Math.round(((north - coordY) / (north - south)) * (px.height - 1));
+    const y = Math.round(
+      ((north - coordY) / (north - south)) * (px.height - 1),
+    );
     if (x < 0 || x >= px.width || y < 0 || y >= px.height) {
       setPrecipInfo("В перекрестии: вне зоны радарного кадра");
       return;
@@ -1408,33 +1720,36 @@ async function loadNowcastFrames(layerName) {
       imageWidth: width,
       imageHeight: height,
     }))
-    .filter((f) => f.url && Array.isArray(f.imageExtent) && f.imageExtent.length === 4)
+    .filter(
+      (f) =>
+        f.url && Array.isArray(f.imageExtent) && f.imageExtent.length === 4,
+    )
     .sort((a, b) => a.timestamp - b.timestamp);
-
-  // Как у HD: сначала локально подгружаем кадры, потом крутим без сетевых пауз.
-  const normalized = [];
-  for (let i = 0; i < normalizedRaw.length; i++) {
-    const f = normalizedRaw[i];
-    setStatus(
-      `Подготовка (${layer}): ${i + 1}/${normalizedRaw.length}`,
-    );
-    try {
-      const localUrl = await getNowcastBlobUrlCached(f.sourceUrl);
-      normalized.push({ ...f, url: localUrl });
-    } catch (e) {
-      console.warn("Frame preload failed, keep source URL:", e);
-      normalized.push(f);
-    }
-  }
-  nowcastFramesByLayer.set(layer, normalized);
-  return normalized;
+  nowcastFramesByLayer.set(layer, normalizedRaw);
+  warmNowcastFramesInBackground(layer, normalizedRaw);
+  return normalizedRaw;
 }
 
 async function loadSatelliteFrames() {
+  const cacheMode = satelliteRadiationColorEnabled ? "color" : "raw";
+  const framesCacheKey = `auto|${SATELLITE_FRAME_LIMIT}|${SATELLITE_CADENCE_MIN}|${cacheMode}`;
+  if (satelliteFramesByKey.has(framesCacheKey)) {
+    return satelliteFramesByKey.get(framesCacheKey);
+  }
+  const [west, south, east, north] = geoBounds;
+  const [width0, height0] = radarImageSize;
+  const width = Number.isFinite(width0) && width0 > 0 ? width0 : 1200;
+  const height = Number.isFinite(height0) && height0 > 0 ? height0 : 1200;
   const params = new URLSearchParams({
     layer: "auto",
     limit: String(SATELLITE_FRAME_LIMIT),
     cadenceMin: String(SATELLITE_CADENCE_MIN),
+    west: String(west),
+    south: String(south),
+    east: String(east),
+    north: String(north),
+    width: String(width),
+    height: String(height),
   });
   setStatus("Загрузка спутниковых кадров...");
   const response = await fetch(`/api/satellite/frames?${params.toString()}`, {
@@ -1454,22 +1769,48 @@ async function loadSatelliteFrames() {
       projection: f.projection || "EPSG:4326",
       imageExtent: Array.isArray(f.imageExtent) ? f.imageExtent : geoBounds,
     }))
-    .filter((f) => f.url && Array.isArray(f.imageExtent) && f.imageExtent.length === 4)
+    .filter(
+      (f) =>
+        f.url && Array.isArray(f.imageExtent) && f.imageExtent.length === 4,
+    )
     .sort((a, b) => a.timestamp - b.timestamp);
+  satelliteFramesByKey.set(framesCacheKey, normalizedRaw);
+  warmSatelliteFramesInBackground(framesCacheKey, normalizedRaw);
+  return normalizedRaw;
+}
 
-  const normalized = [];
-  for (let i = 0; i < normalizedRaw.length; i++) {
-    const f = normalizedRaw[i];
-    setStatus(`Подготовка спутника: ${i + 1}/${normalizedRaw.length}`);
-    try {
-      const localUrl = await getSatelliteBlobUrlCached(f.sourceUrl);
-      normalized.push({ ...f, url: localUrl });
-    } catch (e) {
-      console.warn("Satellite frame preload failed, keep source URL:", e);
-      normalized.push(f);
+function warmNowcastFramesInBackground(layer, framesList) {
+  const target = Array.isArray(framesList) ? framesList : [];
+  if (!target.length) return;
+  (async () => {
+    for (let i = 0; i < target.length; i++) {
+      const frame = target[i];
+      if (!frame?.sourceUrl || nowcastBlobUrlCache.has(frame.sourceUrl)) continue;
+      try {
+        const localUrl = await getNowcastBlobUrlCached(frame.sourceUrl);
+        frame.url = localUrl;
+      } catch (e) {
+        console.warn(`Nowcast warmup failed (${layer} #${i + 1}):`, e);
+      }
     }
-  }
-  return normalized;
+  })();
+}
+
+function warmSatelliteFramesInBackground(cacheKey, framesList) {
+  const target = Array.isArray(framesList) ? framesList : [];
+  if (!target.length) return;
+  (async () => {
+    for (let i = 0; i < target.length; i++) {
+      const frame = target[i];
+      if (!frame?.sourceUrl) continue;
+      try {
+        const localUrl = await getSatelliteBlobUrlCached(frame.sourceUrl);
+        frame.url = localUrl;
+      } catch (e) {
+        console.warn(`Satellite warmup failed (${cacheKey} #${i + 1}):`, e);
+      }
+    }
+  })();
 }
 
 async function getNowcastBlobUrlCached(sourceUrl) {
@@ -1678,7 +2019,9 @@ async function switchSource(layerOrHd) {
     timelineEl.max = String(Math.max(0, frames.length - 1));
     await renderFrame(currentFrame);
     if (frames.length > 1) startPlayback();
-    const resolved = satelliteResolvedLayer ? ` [${satelliteResolvedLayer}]` : "";
+    const resolved = satelliteResolvedLayer
+      ? ` [${satelliteResolvedLayer}]`
+      : "";
     setStatus(
       `Слой: ${getSourceDisplayName(SOURCE_SATELLITE)}${resolved} (кадров: ${frames.length})`,
     );
@@ -1697,7 +2040,9 @@ async function switchSource(layerOrHd) {
     setPlaybackControlsEnabled(true);
     frames = hdFrames.slice();
     timelineEl.max = String(Math.max(0, frames.length - 1));
-    const startIdx = frames.length ? Math.min(currentFrame, frames.length - 1) : 0;
+    const startIdx = frames.length
+      ? Math.min(currentFrame, frames.length - 1)
+      : 0;
     await renderFrame(startIdx);
     if (frames.length > 1) startPlayback();
     setStatus(`Слой: ${getSourceDisplayName(SOURCE_HD)}`);
@@ -1741,7 +2086,7 @@ async function renderFrame(index) {
     timelineEl.value = String(currentFrame);
     timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
     const layerLabel = getSourceDisplayName(activeSource);
-    setStatus(`${layerLabel}: кадр ${currentFrame + 1} / ${frames.length}`);
+    setStatus(`кадр ${currentFrame + 1} / ${frames.length}`);
     inspectPrecipAtCrosshairCenter().catch(() => {});
     return;
   }
@@ -1755,8 +2100,10 @@ async function renderFrame(index) {
   let displayUrl = frame.url;
   if (frame?.url) {
     if (
-      (!Number.isFinite(Number(frame.imageWidth)) || Number(frame.imageWidth) <= 1) ||
-      (!Number.isFinite(Number(frame.imageHeight)) || Number(frame.imageHeight) <= 1)
+      !Number.isFinite(Number(frame.imageWidth)) ||
+      Number(frame.imageWidth) <= 1 ||
+      !Number.isFinite(Number(frame.imageHeight)) ||
+      Number(frame.imageHeight) <= 1
     ) {
       try {
         const size = await getFrameImageSizeCached(frame.url);
@@ -1849,6 +2196,13 @@ function bindControls() {
   crosshairBtnEl?.addEventListener("click", () => {
     setCrosshairMode(!crosshairMode);
   });
+  const onLightningToggle = (event) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    setLightningOverlayEnabled(!lightningOverlayEnabled);
+  };
+  lightningToggleBtnEl?.addEventListener("click", onLightningToggle);
+  lightningToggleBtnEl?.addEventListener("pointerup", onLightningToggle);
   legendToggleEl?.addEventListener("click", () => {
     legendPanelEl?.classList.toggle("legend-collapsed");
   });
@@ -1908,7 +2262,10 @@ async function loadData() {
     Array.isArray(payload.imageSize) &&
     payload.imageSize.length >= 2
   ) {
-    radarImageSize = [Number(payload.imageSize[0]) || 0, Number(payload.imageSize[1]) || 0];
+    radarImageSize = [
+      Number(payload.imageSize[0]) || 0,
+      Number(payload.imageSize[1]) || 0,
+    ];
   }
   if (
     payload.geoBounds &&
@@ -1926,12 +2283,15 @@ async function loadData() {
 
 async function refreshData() {
   try {
-    const prevTime = activeSource === SOURCE_HD ? frames[currentFrame]?.timestamp?.getTime?.() : NaN;
+    const prevTime =
+      activeSource === SOURCE_HD
+        ? frames[currentFrame]?.timestamp?.getTime?.()
+        : NaN;
     await loadData();
     if (activeSource !== SOURCE_HD) {
-      // При обновлении HD очищаем nowcast-кэш в памяти, чтобы при новом выборе слоя
-      // загрузились актуальные кадры из локального серверного кэша.
-      nowcastFramesByLayer.clear();
+      // Не очищаем кэш слоёв при активном non-HD режиме, чтобы повторное
+      // переключение было мгновенным. Актуализация идёт периодическим прогревом сервера.
+      refreshLightningOverlay().catch(() => {});
     }
     upsertRadarLayer();
     if (activeSource !== SOURCE_HD) return;
@@ -1957,6 +2317,7 @@ async function refreshData() {
       currentFrame = frames.length - 1;
     }
     renderFrame(currentFrame);
+    refreshLightningOverlay().catch(() => {});
   } catch (e) {
     console.warn("Refresh data failed:", e);
   }
@@ -1969,6 +2330,7 @@ async function init() {
     createMap();
     bindControls();
     setCrosshairMode(false);
+    setLightningOverlayEnabled(true);
     renderActiveLegend();
     upsertRadarLayer();
     try {
@@ -1984,6 +2346,7 @@ async function init() {
     timelineEl.max = String(Math.max(0, frames.length - 1));
     timelineEl.value = "0";
     await renderFrame(0);
+    await refreshLightningOverlay();
     if (frames.length > 1) startPlayback();
     else updatePlayButton();
     dataRefreshTimer = setInterval(refreshData, DATA_REFRESH_MS);

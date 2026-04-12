@@ -54,8 +54,10 @@ const (
 	clientStaticDir    = "../client/static"
 	framePrefix        = "frame_"
 	lightningFreeBase  = "https://www.limaps.org/JSON/C1"
+	lightningGLD360URL = "https://boxtools.space/all/GLD360.php"
 	nowcastWMSBaseURL  = "https://www.nowcast.ru/baltrad_wsgi"
-	nowcastReferer     = "https://www.nowcast.ru/demo/demo.html"
+	nowcastTokenURL    = "https://www.nowcast.ru/get_token"
+	nowcastReferer     = "https://www.nowcast.ru/RAD/demo.html"
 	nowcastUserAgent   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 	nowcastCacheDir    = "../cache/nowcast"
 	eumetviewWMSBase   = "https://view.eumetsat.int/geoserver/ows"
@@ -119,15 +121,36 @@ type lightningStrike struct {
 	Pol  int     `json:"pol"`
 }
 
+type gld360FeatureCollection struct {
+	Station  string `json:"station"`
+	Features []struct {
+		Type     string `json:"type"`
+		Geometry struct {
+			Type        string    `json:"type"`
+			Coordinates []float64 `json:"coordinates"`
+		} `json:"geometry"`
+		Properties struct {
+			Date string `json:"date"`
+		} `json:"properties"`
+	} `json:"features"`
+}
+
 var (
-	thinSplineEnabled = false
-	thinSplineState   thinSplineRuntime
-	lightningHTTP     = &http.Client{Timeout: 20 * time.Second}
-	nowcastHTTP       = &http.Client{Timeout: 35 * time.Second}
-	satelliteHTTP     = &http.Client{Timeout: 35 * time.Second}
-	eumetTokenMu      sync.Mutex
-	eumetAccessToken  string
-	eumetTokenExpiry  time.Time
+	thinSplineEnabled  = false
+	thinSplineState    thinSplineRuntime
+	lightningHTTP      = &http.Client{Timeout: 20 * time.Second}
+	nowcastHTTP        = &http.Client{Timeout: 35 * time.Second}
+	satelliteHTTP      = &http.Client{Timeout: 35 * time.Second}
+	gld360CacheMu      sync.Mutex
+	gld360CacheKey     string
+	gld360CacheUntil   time.Time
+	gld360CacheStrikes []lightningStrike
+	nowcastTokenMu     sync.Mutex
+	nowcastAccessToken string
+	nowcastTokenExpiry time.Time
+	eumetTokenMu       sync.Mutex
+	eumetAccessToken   string
+	eumetTokenExpiry   time.Time
 )
 
 type wmsCapabilities struct {
@@ -183,6 +206,10 @@ type eumetTokenResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"token_type"`
 	ExpiresIn   int    `json:"expires_in"`
+}
+
+type nowcastTokenResponse struct {
+	Token string `json:"token"`
 }
 
 type thinSplineRuntime struct {
@@ -276,9 +303,15 @@ func main() {
 		}
 	}
 	initStateFromExistingFrames()
-	// Initial fetch
-	go fetchAndProcess()
-	go syncExternalSources("startup")
+	if parseBoolEnv("BLOCKING_WARMUP", true) {
+		if err := runBlockingWarmup(); err != nil {
+			log.Fatalf("Blocking warmup failed: %v", err)
+		}
+	} else {
+		// Initial fetch
+		go fetchAndProcess()
+		go syncExternalSources("startup")
+	}
 
 	// Periodic fetch
 	ticker := time.NewTicker(refreshPeriod)
@@ -293,6 +326,7 @@ func main() {
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/api/radar/latest", handleLatest)
 	http.HandleFunc("/api/lightning/free/latest", handleLightningFreeLatest)
+	http.HandleFunc("/api/lightning/gld360/latest", handleLightningGLD360Latest)
 	http.HandleFunc("/api/nowcast/meta", handleNowcastMeta)
 	http.HandleFunc("/api/nowcast/frames", handleNowcastFrames)
 	http.HandleFunc("/api/nowcast/wms", handleNowcastWMSProxy)
@@ -537,6 +571,239 @@ func handleLightningFreeLatest(w http.ResponseWriter, r *http.Request) {
 		Strikes: out,
 	}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func handleLightningGLD360Latest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	now := time.Now().UTC()
+	minutes := parseQueryInt(r, "minutes", 20, 5, 180)
+	limit := parseQueryInt(r, "limit", 3000, 100, 20000)
+	start := now.Add(-time.Duration(minutes) * time.Minute)
+	stations := parseGLD360Stations(r.URL.Query().Get("stations"))
+
+	west, hasWest := parseQueryFloat(r, "west")
+	east, hasEast := parseQueryFloat(r, "east")
+	south, hasSouth := parseQueryFloat(r, "south")
+	north, hasNorth := parseQueryFloat(r, "north")
+	useBBox := hasWest && hasEast && hasSouth && hasNorth && east > west && north > south
+
+	strikes, err := fetchGLD360LatestCached(
+		r.Context(),
+		stations,
+		start,
+		now,
+		useBBox,
+		west, east, south, north,
+	)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("gld360 error: %v", err), http.StatusBadGateway)
+		return
+	}
+	sort.Slice(strikes, func(i, j int) bool { return strikes[i].Time > strikes[j].Time })
+	if len(strikes) > limit {
+		strikes = strikes[:limit]
+	}
+	resp := struct {
+		Source   string            `json:"source"`
+		Stations []string          `json:"stations"`
+		From     string            `json:"from"`
+		To       string            `json:"to"`
+		Count    int               `json:"count"`
+		Strikes  []lightningStrike `json:"strikes"`
+	}{
+		Source:   "GLD360 (boxtools.space)",
+		Stations: stations,
+		From:     start.Format(time.RFC3339),
+		To:       now.Format(time.RFC3339),
+		Count:    len(strikes),
+		Strikes:  strikes,
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func parseGLD360Stations(raw string) []string {
+	defaultStations := []string{"GLD2NE", "GLD3N", "GLD4S", "MTG1"}
+	if strings.TrimSpace(raw) == "" {
+		return defaultStations
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		station := strings.ToUpper(strings.TrimSpace(part))
+		if station == "" {
+			continue
+		}
+		if _, ok := seen[station]; ok {
+			continue
+		}
+		seen[station] = struct{}{}
+		out = append(out, station)
+	}
+	if len(out) == 0 {
+		return defaultStations
+	}
+	return out
+}
+
+func fetchGLD360LatestCached(
+	ctx context.Context,
+	stations []string,
+	start time.Time,
+	end time.Time,
+	useBBox bool,
+	west float64,
+	east float64,
+	south float64,
+	north float64,
+) ([]lightningStrike, error) {
+	cacheKey := fmt.Sprintf(
+		"stations=%s|from=%s|to=%s|bbox=%t:%.4f,%.4f,%.4f,%.4f",
+		strings.Join(stations, ","),
+		start.UTC().Format(time.RFC3339),
+		end.UTC().Format(time.RFC3339),
+		useBBox,
+		west, east, south, north,
+	)
+	gld360CacheMu.Lock()
+	if gld360CacheKey == cacheKey && time.Now().Before(gld360CacheUntil) {
+		out := append([]lightningStrike(nil), gld360CacheStrikes...)
+		gld360CacheMu.Unlock()
+		return out, nil
+	}
+	gld360CacheMu.Unlock()
+
+	out, err := fetchGLD360Latest(ctx, stations, start, end, useBBox, west, east, south, north)
+	if err != nil {
+		return nil, err
+	}
+	gld360CacheMu.Lock()
+	gld360CacheKey = cacheKey
+	gld360CacheUntil = time.Now().Add(20 * time.Second)
+	gld360CacheStrikes = append([]lightningStrike(nil), out...)
+	gld360CacheMu.Unlock()
+	return out, nil
+}
+
+func fetchGLD360Latest(
+	ctx context.Context,
+	stations []string,
+	start time.Time,
+	end time.Time,
+	useBBox bool,
+	west float64,
+	east float64,
+	south float64,
+	north float64,
+) ([]lightningStrike, error) {
+	all := make([]lightningStrike, 0, 4096)
+	seen := make(map[string]struct{}, 8192)
+	for _, station := range stations {
+		part, err := fetchGLD360Station(ctx, station, start, end, useBBox, west, east, south, north)
+		if err != nil {
+			log.Printf("[lightning/gld360] station=%s warning: %v", station, err)
+			continue
+		}
+		for _, s := range part {
+			key := fmt.Sprintf("%s|%.4f|%.4f", s.Time, s.Lat, s.Lon)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			all = append(all, s)
+		}
+	}
+	if len(all) == 0 {
+		return []lightningStrike{}, nil
+	}
+	return all, nil
+}
+
+func fetchGLD360Station(
+	ctx context.Context,
+	station string,
+	start time.Time,
+	end time.Time,
+	useBBox bool,
+	west float64,
+	east float64,
+	south float64,
+	north float64,
+) ([]lightningStrike, error) {
+	payload, err := json.Marshal(map[string]string{"station": station})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, lightningGLD360URL, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", nowcastUserAgent)
+	req.Header.Set("Accept", "application/json,*/*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://boxtools.space")
+	req.Header.Set("Referer", "https://boxtools.space/all/GLD360.php")
+	resp, err := lightningHTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("station %s: HTTP %d", station, resp.StatusCode)
+	}
+	var fc gld360FeatureCollection
+	if err := json.Unmarshal(body, &fc); err != nil {
+		return nil, fmt.Errorf("station %s: %w", station, err)
+	}
+	out := make([]lightningStrike, 0, len(fc.Features))
+	for _, f := range fc.Features {
+		if len(f.Geometry.Coordinates) < 2 {
+			continue
+		}
+		lon := f.Geometry.Coordinates[0]
+		lat := f.Geometry.Coordinates[1]
+		if !NumberIsFinite(lat) || !NumberIsFinite(lon) {
+			continue
+		}
+		t, ok := parseGLD360Time(f.Properties.Date)
+		if !ok || t.Before(start) || t.After(end.Add(2*time.Minute)) {
+			continue
+		}
+		if useBBox && (lon < west || lon > east || lat < south || lat > north) {
+			continue
+		}
+		out = append(out, lightningStrike{
+			Time: t.Format(time.RFC3339Nano),
+			Lat:  lat,
+			Lon:  lon,
+			Pol:  0,
+		})
+	}
+	return out, nil
+}
+
+func parseGLD360Time(raw string) (time.Time, bool) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return time.Time{}, false
+	}
+	layouts := []string{
+		"2006-01-02 15:04:05-07",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05 MST",
+		"2006-01-02 15:04 MST",
+		time.RFC3339,
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func fetchFreeLightningBucket(
@@ -852,10 +1119,10 @@ func handleNowcastFrames(w http.ResponseWriter, r *http.Request) {
 	}
 
 	frames := make([]nowcastFrameInfo, 0, len(times))
-	prefetchHit := 0
-	prefetchMiss := 0
-	prefetchFetched := 0
-	prefetchFailed := 0
+	cacheHit := 0
+	cacheMiss := 0
+	warmQueued := 0
+	misses := make([]string, 0, len(times))
 	for _, t := range times {
 		values := url.Values{}
 		values.Set("SERVICE", "WMS")
@@ -873,20 +1140,10 @@ func handleNowcastFrames(w http.ResponseWriter, r *http.Request) {
 
 		canonical := canonicalNowcastQuery(values)
 		if _, _, ok := readNowcastCache(canonical, nowcastCacheMaxAge("getmap", values)); !ok {
-			prefetchMiss++
-			if _, _, _, err := fetchNowcastAndMaybeCache(r.Context(), canonical, "getmap", true); err != nil {
-				// Клиент мог прервать запрос при переключении слоя/перезагрузке страницы.
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					log.Printf("[nowcast/frames] canceled while prefetch: layer=%q time=%s", layer, t)
-					break
-				}
-				log.Printf("Nowcast prefetch warning (%s @ %s): %v", layer, t, err)
-				prefetchFailed++
-				continue
-			}
-			prefetchFetched++
+			cacheMiss++
+			misses = append(misses, canonical)
 		} else {
-			prefetchHit++
+			cacheHit++
 		}
 		frames = append(frames, nowcastFrameInfo{
 			URL:         "/api/nowcast/wms?" + canonical,
@@ -895,29 +1152,34 @@ func handleNowcastFrames(w http.ResponseWriter, r *http.Request) {
 			ImageExtent: imageExtent,
 		})
 	}
+	if len(misses) > 0 {
+		warmQueued = len(misses)
+		go warmNowcastCanonicals(misses)
+	}
 
 	out := struct {
 		Layer       string             `json:"layer"`
 		Projection  string             `json:"projection"`
 		ImageExtent [4]float64         `json:"imageExtent"`
 		FrameCount  int                `json:"frameCount"`
+		Warming     bool               `json:"warming,omitempty"`
 		Frames      []nowcastFrameInfo `json:"frames"`
 	}{
 		Layer:       layer,
 		Projection:  crs,
 		ImageExtent: imageExtent,
 		FrameCount:  len(frames),
+		Warming:     warmQueued > 0,
 		Frames:      frames,
 	}
 	_ = json.NewEncoder(w).Encode(out)
 	log.Printf(
-		"[nowcast/frames] done: layer=%q frames=%d cache_hit=%d cache_miss=%d fetched=%d failed=%d elapsed=%s",
+		"[nowcast/frames] done: layer=%q frames=%d cache_hit=%d cache_miss=%d warm_queued=%d elapsed=%s",
 		layer,
 		len(frames),
-		prefetchHit,
-		prefetchMiss,
-		prefetchFetched,
-		prefetchFailed,
+		cacheHit,
+		cacheMiss,
+		warmQueued,
 		time.Since(started).Round(time.Millisecond),
 	)
 }
@@ -996,19 +1258,30 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 	)
 	frames := make([]satelliteFrameInfo, 0, len(picked))
 	imageExtent := [4]float64{west, south, east, north}
-	prefetchOK := 0
-	prefetchFail := 0
+	cacheHit := 0
+	cacheMiss := 0
+	warmQueued := 0
+	sourceID := "token"
+	if strings.TrimSpace(token) == "" {
+		sourceID = "public"
+	}
+	baseUsed := preferredEUMETWMSBases()[0]
+	warmTasks := make([]satelliteWarmTask, 0, len(picked))
 	for _, tStr := range picked {
-		if _, _, _, _, err := fetchSatelliteImageWithFallback(r.Context(), token, layer, tStr, imageExtent, width, height, true); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				log.Printf("[satellite/frames] canceled while prefetch: layer=%q time=%s", layer, tStr)
-				break
-			}
-			log.Printf("EUMET prefetch warning (%s @ %s): %v", layer, tStr, err)
-			prefetchFail++
-			continue
+		cacheKey := "img:" + satelliteImageCanonicalCacheKey(baseUsed, sourceID, layer, tStr, imageExtent, width, height)
+		if _, _, ok := readSatelliteCache(cacheKey, satelliteImageCacheMaxAge(tStr)); ok {
+			cacheHit++
+		} else {
+			cacheMiss++
+			warmTasks = append(warmTasks, satelliteWarmTask{
+				layer:   layer,
+				timeStr: tStr,
+				bounds:  imageExtent,
+				width:   width,
+				height:  height,
+				token:   token,
+			})
 		}
-		prefetchOK++
 		frames = append(frames, satelliteFrameInfo{
 			URL: "/api/satellite/image?layer=" + url.QueryEscape(layer) +
 				"&time=" + url.QueryEscape(tStr) +
@@ -1023,6 +1296,10 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 			ImageExtent: imageExtent,
 		})
 	}
+	if len(warmTasks) > 0 {
+		warmQueued = len(warmTasks)
+		go warmSatelliteTasks(warmTasks)
+	}
 
 	out := struct {
 		Provider    string               `json:"provider"`
@@ -1033,6 +1310,7 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 		Projection  string               `json:"projection"`
 		ImageExtent [4]float64           `json:"imageExtent"`
 		FrameCount  int                  `json:"frameCount"`
+		Warming     bool                 `json:"warming,omitempty"`
 		Frames      []satelliteFrameInfo `json:"frames"`
 	}{
 		Provider:    "eumetview",
@@ -1043,12 +1321,13 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 		Projection:  "EPSG:4326",
 		ImageExtent: imageExtent,
 		FrameCount:  len(frames),
+		Warming:     warmQueued > 0,
 		Frames:      frames,
 	}
 	_ = json.NewEncoder(w).Encode(out)
 	log.Printf(
-		"[satellite/frames] done: layer=%q frames=%d prefetch_ok=%d prefetch_fail=%d elapsed=%s",
-		layer, len(frames), prefetchOK, prefetchFail, time.Since(started).Round(time.Millisecond),
+		"[satellite/frames] done: layer=%q frames=%d cache_hit=%d cache_miss=%d warm_queued=%d elapsed=%s",
+		layer, len(frames), cacheHit, cacheMiss, warmQueued, time.Since(started).Round(time.Millisecond),
 	)
 }
 
@@ -1122,13 +1401,27 @@ func syncExternalSources(reason string) {
 	defer cancel()
 	log.Printf("[sync] start: reason=%s window=%d", reason, syncFrameLimit)
 
+	_ = syncExternalSourcesWithContext(ctx)
+	log.Printf("[sync] done: reason=%s elapsed=%s", reason, time.Since(started).Round(time.Millisecond))
+}
+
+func syncExternalSourcesWithContext(ctx context.Context) error {
+	var errs []error
 	if err := syncNowcastFrames(ctx); err != nil {
 		log.Printf("[sync] nowcast error: %v", err)
+		errs = append(errs, fmt.Errorf("nowcast: %w", err))
 	}
 	if err := syncSatelliteFrames(ctx); err != nil {
 		log.Printf("[sync] satellite error: %v", err)
+		errs = append(errs, fmt.Errorf("satellite: %w", err))
 	}
-	log.Printf("[sync] done: reason=%s elapsed=%s", reason, time.Since(started).Round(time.Millisecond))
+	if len(errs) == 0 {
+		return nil
+	}
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	return fmt.Errorf("%v; %v", errs[0], errs[1])
 }
 
 func syncNowcastFrames(ctx context.Context) error {
@@ -1165,7 +1458,8 @@ func syncNowcastFrames(ctx context.Context) error {
 		"REQUEST=GetCapabilities&SERVICE=WMS&VERSION=1.3.0": {},
 	}
 	fetched := 0
-	for _, layer := range nowcastSyncLayers {
+	layers := listNowcastPrefetchLayers(layerTimes)
+	for _, layer := range layers {
 		times := intersectLayerTimes(layer, layerTimes)
 		if len(times) == 0 {
 			continue
@@ -1207,7 +1501,7 @@ func syncNowcastFrames(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("[sync/nowcast] done: keep=%d fetched=%d pruned=%d", len(keep), fetched, pruned)
+	log.Printf("[sync/nowcast] done: layers=%d keep=%d fetched=%d pruned=%d", len(layers), len(keep), fetched, pruned)
 	return nil
 }
 
@@ -1227,20 +1521,9 @@ func syncSatelliteFrames(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("capabilities parse: %w", err)
 	}
-	layer, _, err := resolveEUMETLayer(requestedLayer, layerTimes, layerTitles)
-	if err != nil {
-		return fmt.Errorf("resolve layer: %w", err)
-	}
-	times := intersectLayerTimes(layer, layerTimes)
-	if len(times) == 0 {
-		return fmt.Errorf("no times for layer %s", layer)
-	}
-	picked, err := pickSatelliteTimes(times, syncFrameLimit, time.Duration(frameIntervalMin)*time.Minute)
-	if err != nil {
-		return fmt.Errorf("pick times: %w", err)
-	}
-	if len(picked) == 0 {
-		return fmt.Errorf("empty picked times")
+	layers := listSatellitePrefetchLayers(requestedLayer, layerTimes, layerTitles)
+	if len(layers) == 0 {
+		return errors.New("no satellite layers selected for prefetch")
 	}
 
 	state.mu.RLock()
@@ -1253,38 +1536,250 @@ func syncSatelliteFrames(ctx context.Context) error {
 	width, height := defaultSatelliteImageSize(west, south, east, north)
 	bounds := [4]float64{west, south, east, north}
 
-	keep := make(map[string]struct{}, len(picked))
+	keep := make(map[string]struct{}, syncFrameLimit*len(layers))
 	fetched := 0
+	layerCount := 0
 	sourceID := "token"
 	if strings.TrimSpace(token) == "" {
 		sourceID = "public"
 	}
-	for _, tStr := range picked {
-		base, _, _, status, err := fetchSatelliteImageWithFallback(ctx, token, layer, tStr, bounds, width, height, true)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
+	for _, layer := range layers {
+		times := intersectLayerTimes(layer, layerTimes)
+		if len(times) == 0 {
+			continue
+		}
+		picked, err := pickSatelliteTimes(times, syncFrameLimit, time.Duration(frameIntervalMin)*time.Minute)
+		if err != nil || len(picked) == 0 {
+			continue
+		}
+		layerCount++
+		for _, tStr := range picked {
+			base, _, _, status, err := fetchSatelliteImageWithFallback(ctx, token, layer, tStr, bounds, width, height, true)
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err
+				}
+				log.Printf("[sync/satellite] prefetch warning layer=%s time=%s: %v", layer, tStr, err)
+				continue
 			}
-			log.Printf("[sync/satellite] prefetch warning layer=%s time=%s: %v", layer, tStr, err)
-			continue
+			if status != http.StatusOK {
+				log.Printf("[sync/satellite] upstream non-200 layer=%s time=%s status=%d", layer, tStr, status)
+				continue
+			}
+			cacheKey := satelliteImageCanonicalCacheKey(base, sourceID, layer, tStr, bounds, width, height)
+			keep["img:"+cacheKey] = struct{}{}
+			fetched++
 		}
-		if status != http.StatusOK {
-			log.Printf("[sync/satellite] upstream non-200 layer=%s time=%s status=%d", layer, tStr, status)
-			continue
-		}
-		cacheKey := satelliteImageCanonicalCacheKey(base, sourceID, layer, tStr, bounds, width, height)
-		keep["img:"+cacheKey] = struct{}{}
-		fetched++
 	}
 	pruned, err := pruneSatelliteImageCacheExcept(keep)
 	if err != nil {
 		return err
 	}
 	log.Printf(
-		"[sync/satellite] done: auth=%s layer=%s keep=%d fetched=%d pruned=%d",
-		authMode, layer, len(keep), fetched, pruned,
+		"[sync/satellite] done: auth=%s layers=%d keep=%d fetched=%d pruned=%d",
+		authMode, layerCount, len(keep), fetched, pruned,
 	)
 	return nil
+}
+
+type satelliteWarmTask struct {
+	layer   string
+	timeStr string
+	bounds  [4]float64
+	width   int
+	height  int
+	token   string
+}
+
+func warmNowcastCanonicals(canonicals []string) {
+	if len(canonicals) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	for _, canonical := range canonicals {
+		if strings.TrimSpace(canonical) == "" {
+			continue
+		}
+		if _, _, ok := readNowcastCache(canonical, 0); ok {
+			continue
+		}
+		if _, _, _, err := fetchNowcastAndMaybeCache(ctx, canonical, "getmap", true); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+		}
+	}
+}
+
+func warmSatelliteTasks(tasks []satelliteWarmTask) {
+	if len(tasks) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	for _, task := range tasks {
+		_, _, _, _, err := fetchSatelliteImageWithFallback(
+			ctx,
+			task.token,
+			task.layer,
+			task.timeStr,
+			task.bounds,
+			task.width,
+			task.height,
+			true,
+		)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+			continue
+		}
+	}
+}
+
+func listNowcastPrefetchLayers(layerTimes map[string][]string) []string {
+	seen := make(map[string]struct{}, len(nowcastSyncLayers))
+	out := make([]string, 0, len(nowcastSyncLayers))
+	for _, candidate := range nowcastSyncLayers {
+		layer := strings.TrimSpace(candidate)
+		if layer == "" {
+			continue
+		}
+		if _, ok := seen[layer]; ok {
+			continue
+		}
+		times := layerTimes[layer]
+		if len(times) == 0 {
+			continue
+		}
+		seen[layer] = struct{}{}
+		out = append(out, layer)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func listSatellitePrefetchLayers(
+	requestedLayer string,
+	layerTimes map[string][]string,
+	layerTitles map[string]string,
+) []string {
+	seen := make(map[string]struct{}, 16)
+	add := func(layer string) {
+		name := strings.TrimSpace(layer)
+		if name == "" || len(intersectLayerTimes(name, layerTimes)) == 0 {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+	}
+	if resolved, _, err := resolveEUMETLayer(requestedLayer, layerTimes, layerTitles); err == nil {
+		add(resolved)
+	}
+	if extra := strings.TrimSpace(os.Getenv("EUMETVIEW_PREFETCH_LAYERS")); extra != "" {
+		for _, token := range strings.Split(extra, ",") {
+			add(token)
+		}
+	}
+	preferred := []string{
+		strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER")),
+		eumetDefaultLayer,
+		"mumi:worldcloudmap_ir108",
+		"msg_fes:ir108",
+		"msg_iodc:ir108",
+		"msg_fes:ir108_hrv",
+		"Meteosat:msg_ir108",
+	}
+	for _, layer := range preferred {
+		add(layer)
+	}
+	for name, times := range layerTimes {
+		if len(times) == 0 {
+			continue
+		}
+		title := strings.ToLower(strings.TrimSpace(layerTitles[name]))
+		lowName := strings.ToLower(strings.TrimSpace(name))
+		if strings.Contains(lowName, "ir108") || strings.Contains(lowName, "ir 10.8") ||
+			strings.Contains(lowName, "brightness") || strings.Contains(title, "infrared") ||
+			strings.Contains(title, "brightness temperature") {
+			add(name)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for layer := range seen {
+		out = append(out, layer)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func parseBoolEnv(key string, def bool) bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if raw == "" {
+		return def
+	}
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
+}
+
+func parseIntEnv(key string, def int, min int, max int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func runBlockingWarmup() error {
+	retries := parseIntEnv("BLOCKING_WARMUP_RETRIES", 2, 1, 10)
+	timeoutSec := parseIntEnv("BLOCKING_WARMUP_TIMEOUT_SEC", int(syncRequestTimeout.Seconds()), 30, 1800)
+	attemptSleepSec := parseIntEnv("BLOCKING_WARMUP_RETRY_SLEEP_SEC", 5, 1, 120)
+	var lastErr error
+	started := time.Now()
+	for attempt := 1; attempt <= retries; attempt++ {
+		attemptStarted := time.Now()
+		log.Printf("[warmup] attempt %d/%d start", attempt, retries)
+		fetchAndProcess()
+		state.mu.RLock()
+		hdReady := state.initialLoadDone && len(state.frames) > 0
+		state.mu.RUnlock()
+		if !hdReady {
+			lastErr = errors.New("hd frames are not ready after pipeline run")
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+			err := syncExternalSourcesWithContext(ctx)
+			cancel()
+			if err == nil {
+				log.Printf("[warmup] complete: attempts=%d elapsed=%s", attempt, time.Since(started).Round(time.Millisecond))
+				return nil
+			}
+			lastErr = err
+		}
+		log.Printf("[warmup] attempt %d failed after %s: %v", attempt, time.Since(attemptStarted).Round(time.Millisecond), lastErr)
+		if attempt < retries {
+			time.Sleep(time.Duration(attemptSleepSec) * time.Second)
+		}
+	}
+	return fmt.Errorf("blocking warmup failed after %d attempts: %w", retries, lastErr)
 }
 
 func satelliteImageCacheMaxAge(timeStr string) time.Duration {
@@ -1703,6 +2198,85 @@ func getEUMETViewAccessToken(ctx context.Context) (string, error) {
 	return "", errors.New("failed to obtain EUMETSAT token")
 }
 
+func getNowcastAccessToken(ctx context.Context) (string, error) {
+	if token := strings.TrimSpace(os.Getenv("NOWCAST_ACCESS_TOKEN")); token != "" {
+		return token, nil
+	}
+	nowcastTokenMu.Lock()
+	defer nowcastTokenMu.Unlock()
+	if nowcastAccessToken != "" && time.Until(nowcastTokenExpiry) > 60*time.Second {
+		return nowcastAccessToken, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nowcastTokenURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json,*/*")
+	req.Header.Set("Referer", nowcastReferer)
+	req.Header.Set("User-Agent", nowcastUserAgent)
+	resp, err := nowcastHTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("nowcast token http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var tr nowcastTokenResponse
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(tr.Token)
+	if token == "" {
+		return "", errors.New("empty nowcast access token")
+	}
+	exp := time.Now().Add(3 * time.Minute)
+	if parsed, ok := parseJWTExpiry(token); ok {
+		exp = parsed
+	}
+	nowcastAccessToken = token
+	nowcastTokenExpiry = exp
+	return nowcastAccessToken, nil
+}
+
+func parseJWTExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) < 2 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claim struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claim); err != nil {
+		return time.Time{}, false
+	}
+	if claim.Exp <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claim.Exp, 0), true
+}
+
+func withNowcastAccessToken(ctx context.Context, values url.Values) (url.Values, error) {
+	out := cloneValues(values)
+	if strings.TrimSpace(firstNonEmpty(out.Get("token"), out.Get("TOKEN"))) != "" {
+		return out, nil
+	}
+	token, err := getNowcastAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out.Set("token", token)
+	return out, nil
+}
+
 func requestEUMETAccessToken(
 	ctx context.Context,
 	endpoint string,
@@ -1922,7 +2496,15 @@ func fetchNowcastAndMaybeCache(
 	reqType string,
 	allowCacheWrite bool,
 ) ([]byte, string, int, error) {
-	upstreamURL := nowcastWMSBaseURL + "?" + canonical
+	values, err := url.ParseQuery(canonical)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	upstreamValues, err := withNowcastAccessToken(ctx, values)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	upstreamURL := nowcastWMSBaseURL + "?" + canonicalNowcastQuery(upstreamValues)
 	reqURL, _ := url.Parse(upstreamURL)
 	layer := ""
 	timeVal := ""
@@ -2188,7 +2770,15 @@ func getNowcastCapabilitiesCached(ctx context.Context) ([]byte, error) {
 		return body, nil
 	}
 	log.Printf("[nowcast/cache] MISS capabilities -> fetch upstream")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nowcastWMSBaseURL+"?"+q, nil)
+	values, err := url.ParseQuery(q)
+	if err != nil {
+		return nil, err
+	}
+	upstreamValues, err := withNowcastAccessToken(ctx, values)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nowcastWMSBaseURL+"?"+canonicalNowcastQuery(upstreamValues), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -3879,7 +4469,7 @@ func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Im
 			infillMask, prevArtifactMask, nextArtifactMask,
 			motionPrev, motionNext,
 		)
-		fillLightningMaskHoles(out, lightningMasks[i])
+		fillLightningMaskHoles(out, lightningMasks[i], composed[i])
 		infillCityMaskNowcast(
 			out,
 			cityInfillMask,
@@ -4480,7 +5070,7 @@ func subtractReference(
 
 	// Финальный штрих: восстанавливаем мелкие пропуски внутри облаков
 	fillTinyHolesFromRaw(dst, src, 3)
-	fillEnclosedTransparentHoles(dst, 140)
+	fillEnclosedTransparentHoles(dst, src, 140)
 	softSnapToLegend(dst)
 
 	return dst
@@ -4637,7 +5227,7 @@ func fillTinyHolesFromRaw(dst *image.RGBA, raw image.Image, maxArea int) {
 				continue
 			}
 
-			// Restore from unprocessed frame at the same pixels.
+			// Restore directly from original frame at the same pixels.
 			for _, i := range region {
 				cx := i % w
 				cy := i / w
@@ -4651,23 +5241,19 @@ func fillTinyHolesFromRaw(dst *image.RGBA, raw image.Image, maxArea int) {
 					B: uint8(rb >> 8),
 					A: 255,
 				}
-				legendColor, ok := mapToLegendColorStrict(rawColor)
-				if !ok {
+				if !isUsefulPrecipPixel(rawColor, 12) {
 					continue
 				}
-				if isTornadoClass(legendColor) {
-					continue
-				}
-				dst.SetRGBA(cx, cy, legendColor)
+				dst.SetRGBA(cx, cy, rawColor)
 			}
 		}
 	}
 }
 
 // fillEnclosedTransparentHoles closes small fully enclosed transparent islands
-// that remain after per-pixel filtering.
-func fillEnclosedTransparentHoles(dst *image.RGBA, maxArea int) {
-	if dst == nil || maxArea <= 0 {
+// by restoring pixels from the original raw frame at the same coordinates.
+func fillEnclosedTransparentHoles(dst *image.RGBA, raw image.Image, maxArea int) {
+	if dst == nil || raw == nil || maxArea <= 0 {
 		return
 	}
 	bounds := dst.Bounds()
@@ -4730,7 +5316,6 @@ func fillEnclosedTransparentHoles(dst *image.RGBA, maxArea int) {
 				continue
 			}
 
-			votes := make(map[key]int)
 			support := 0
 			for _, i := range region {
 				cx := i % w
@@ -4742,38 +5327,41 @@ func fillEnclosedTransparentHoles(dst *image.RGBA, maxArea int) {
 						continue
 					}
 					c := dst.RGBAAt(nx, ny)
-					if !isUsefulPrecipPixel(c, 16) {
-						continue
+					if isUsefulPrecipPixel(c, 16) {
+						support++
 					}
-					nc := nearestPhenomenaColor(c)
-					votes[key{nc.R, nc.G, nc.B}]++
-					support++
 				}
 			}
-			if support < len(region)*3 || len(votes) == 0 {
+			if support < len(region)*3 {
 				continue
 			}
 
-			var best key
-			bestN := -1
-			for k, n := range votes {
-				if n > bestN {
-					bestN = n
-					best = k
-				}
-			}
-			fill := color.RGBA{R: best[0], G: best[1], B: best[2], A: 255}
 			for _, i := range region {
-				dst.SetRGBA(i%w, i/w, fill)
+				cx := i % w
+				cy := i / w
+				rr, rg, rb, ra := raw.At(cx+bounds.Min.X, cy+bounds.Min.Y).RGBA()
+				if ra == 0 {
+					continue
+				}
+				rawColor := color.RGBA{
+					R: uint8(rr >> 8),
+					G: uint8(rg >> 8),
+					B: uint8(rb >> 8),
+					A: 255,
+				}
+				if !isUsefulPrecipPixel(rawColor, 12) {
+					continue
+				}
+				dst.SetRGBA(cx, cy, rawColor)
 			}
 		}
 	}
 }
 
-// fillLightningMaskHoles performs conservative local repaint inside detected
-// lightning-glyph mask to avoid transparent gaps under removed pluses.
-func fillLightningMaskHoles(dst *image.RGBA, lightningMask []bool) {
-	if dst == nil || lightningMask == nil {
+// fillLightningMaskHoles restores transparent pixels inside detected lightning-glyph
+// mask from the original raw frame.
+func fillLightningMaskHoles(dst *image.RGBA, lightningMask []bool, raw image.Image) {
+	if dst == nil || lightningMask == nil || raw == nil {
 		return
 	}
 	b := dst.Bounds()
@@ -4781,63 +5369,28 @@ func fillLightningMaskHoles(dst *image.RGBA, lightningMask []bool) {
 	if len(lightningMask) < w*h {
 		return
 	}
-	type key [3]uint8
-	for pass := 0; pass < 2; pass++ {
-		tmp := image.NewRGBA(b)
-		copy(tmp.Pix, dst.Pix)
-		for y := 0; y < h; y++ {
-			for x := 0; x < w; x++ {
-				idx := y*w + x
-				if !lightningMask[idx] || dst.RGBAAt(x, y).A > 0 {
-					continue
-				}
-				votes := make(map[key]int)
-				support := 0
-				for oy := -3; oy <= 3; oy++ {
-					for ox := -3; ox <= 3; ox++ {
-						if ox == 0 && oy == 0 {
-							continue
-						}
-						nx := x + ox
-						ny := y + oy
-						if nx < 0 || nx >= w || ny < 0 || ny >= h {
-							continue
-						}
-						nidx := ny*w + nx
-						c := dst.RGBAAt(nx, ny)
-						if lightningMask[nidx] && c.A == 0 {
-							continue
-						}
-						if !isUsefulPrecipPixel(c, 12) {
-							continue
-						}
-						nc := nearestPhenomenaColor(c)
-						weight := 1
-						md := absInt(ox) + absInt(oy)
-						if md <= 2 {
-							weight = 3
-						} else if md <= 4 {
-							weight = 2
-						}
-						votes[key{nc.R, nc.G, nc.B}] += weight
-						support += weight
-					}
-				}
-				if support < 9 || len(votes) == 0 {
-					continue
-				}
-				var best key
-				bestN := -1
-				for k, n := range votes {
-					if n > bestN {
-						bestN = n
-						best = k
-					}
-				}
-				tmp.SetRGBA(x, y, color.RGBA{R: best[0], G: best[1], B: best[2], A: 255})
+
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			idx := y*w + x
+			if !lightningMask[idx] || dst.RGBAAt(x, y).A > 0 {
+				continue
 			}
+			rr, rg, rb, ra := raw.At(x+b.Min.X, y+b.Min.Y).RGBA()
+			if ra == 0 {
+				continue
+			}
+			rawColor := color.RGBA{
+				R: uint8(rr >> 8),
+				G: uint8(rg >> 8),
+				B: uint8(rb >> 8),
+				A: 255,
+			}
+			if !isUsefulPrecipPixel(rawColor, 12) {
+				continue
+			}
+			dst.SetRGBA(x, y, rawColor)
 		}
-		copy(dst.Pix, tmp.Pix)
 	}
 }
 
