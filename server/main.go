@@ -63,7 +63,7 @@ const (
 	eumetviewWMSBase   = "https://view.eumetsat.int/geoserver/ows"
 	eumetTokenURL      = "https://gateway.apis.eumetsat.int/token"
 	eumetTokenURLAlt   = "https://api.eumetsat.int/token"
-	eumetDefaultLayer  = "msg_fes:ir108"
+	eumetDefaultLayer  = "msg_fes:rgb_eview"
 	satelliteCacheDir  = "../cache/satellite"
 	syncFrameLimit     = 18
 	syncRequestTimeout = 95 * time.Second
@@ -1687,6 +1687,8 @@ func listSatellitePrefetchLayers(
 	preferred := []string{
 		strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER")),
 		eumetDefaultLayer,
+		"msg_fes:rgb_eview",
+		"msg_iodc:rgb_eview",
 		"mumi:worldcloudmap_ir108",
 		"msg_fes:ir108",
 		"msg_iodc:ir108",
@@ -2071,6 +2073,8 @@ func resolveEUMETLayer(
 	candidates := []string{
 		strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER")),
 		eumetDefaultLayer,
+		"msg_fes:rgb_eview",
+		"msg_iodc:rgb_eview",
 		"mumi:worldcloudmap_ir108",
 		"msg_fes:ir108",
 		"msg_iodc:ir108",
@@ -2112,6 +2116,12 @@ func resolveEUMETLayer(
 		score := 0
 		if strings.Contains(sn, "msg_fes") {
 			score += 4
+		}
+		if strings.Contains(sn, "rgb_eview") || strings.Contains(sn, "european hrv rgb") {
+			score += 12
+		}
+		if strings.Contains(sn, "hrv") || strings.Contains(sn, "rgb") {
+			score += 3
 		}
 		if strings.Contains(sn, "ir108") || strings.Contains(sn, "ir 10.8") || strings.Contains(sn, "10.8") {
 			score += 8

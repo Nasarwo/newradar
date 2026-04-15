@@ -1,7 +1,7 @@
-const FRAME_FAST_INTERVAL_MS = 120;
-const FRAME_LAST_HOLD_MS = 2000;
-const SATELLITE_FRAME_FAST_INTERVAL_MS = 420;
-const SATELLITE_FRAME_LAST_HOLD_MS = 2400;
+const FRAME_FAST_INTERVAL_MS = 150;
+const FRAME_LAST_HOLD_MS = 2200;
+const SATELLITE_FRAME_FAST_INTERVAL_MS = 500;
+const SATELLITE_FRAME_LAST_HOLD_MS = 2700;
 const DATA_REFRESH_MS = 60_000;
 const NOWCAST_WMS_VERSION = "1.3.0";
 const SATELLITE_FRAME_LIMIT = 18;
@@ -22,7 +22,7 @@ const NOWCAST_LAYER_ORDER = [
   "bufr_dbz1",
   "bufr_precip",
 ];
-const SATELLITE_LAYER_LABEL = "Спутник Cloud Tops Alert (beta)";
+const SATELLITE_LAYER_LABEL = "Спутник HD";
 const SATELLITE_WMTS_LAYER_CANDIDATES = [
   "GOES-East_ABI_Band13_Clean_Infrared",
   "GOES-West_ABI_Band13_Clean_Infrared",
@@ -43,22 +43,41 @@ const DEFAULT_GEO_BOUNDS = [20, 40, 70, 66]; // [west, south, east, north] WGS84
 const statusEl = document.getElementById("status");
 const timeLabelEl = document.getElementById("timeLabel");
 const timelineEl = document.getElementById("timeline");
+const mobileMenuToggleBtnEl = document.getElementById("mobileMenuToggleBtn");
+const mobileMenuBackdropEl = document.getElementById("mobileMenuBackdrop");
+const mobileMenuDrawerEl = document.getElementById("mobileMenuDrawer");
+const mobileMenuCloseBtnEl = document.getElementById("mobileMenuCloseBtn");
 const playBtnEl = document.getElementById("playBtn");
+const firstBtnEl = document.getElementById("firstBtn");
 const prevBtnEl = document.getElementById("prevBtn");
 const nextBtnEl = document.getElementById("nextBtn");
+const lastBtnEl = document.getElementById("lastBtn");
 const measureBtnEl = document.getElementById("measureBtn");
 const drawBtnEl = document.getElementById("drawBtn");
 const crosshairBtnEl = document.getElementById("crosshairBtn");
 const lightningToggleBtnEl = document.getElementById("lightningToggleBtn");
 const playbackFrameCountEl = document.getElementById("playbackFrameCount");
 const sourceLayerSelectEl = document.getElementById("sourceLayerSelect");
+const mobileSourceLayerSelectEl = document.getElementById(
+  "mobileSourceLayerSelect",
+);
+const mobileSatelliteStylePanelEl = document.getElementById(
+  "mobileSatelliteStylePanel",
+);
+const mobileSatelliteColorToggleEl = document.getElementById(
+  "mobileSatelliteColorToggle",
+);
 const satelliteStylePanelEl = document.getElementById("satelliteStylePanel");
-const satelliteTempColorToggleEl =
-  document.getElementById("satelliteTempColor");
+const satelliteColorModeEl = document.getElementById("satelliteColorMode");
 const legendPanelEl = document.getElementById("legendPanel");
 const legendToggleEl = document.getElementById("legendToggle");
 const legendTitleTextEl = document.getElementById("legendTitleText");
 const legendRowsEl = document.getElementById("legendRows");
+const mobileLegendPanelEl = document.getElementById("mobileLegendPanel");
+const mobileLegendTitleTextEl = document.getElementById(
+  "mobileLegendTitleText",
+);
+const mobileLegendRowsEl = document.getElementById("mobileLegendRows");
 const mapCrosshairEl = document.getElementById("mapCrosshair");
 const crosshairInfoEl = document.getElementById("crosshairInfo");
 const lightningPopupEl = document.getElementById("lightningPopup");
@@ -101,6 +120,7 @@ let drawCurrentStroke = null;
 let drawCurrentStrokeFeature = null;
 let satelliteWMTSConfig = null;
 const satelliteSourceCache = new Map();
+let sourceSwitchToken = 0;
 const PHENOMENA_LEGEND = [
   { label: "Обл. сред. яруса", rgb: [156, 170, 179] },
   { label: "Сл. образования", rgb: [162, 198, 254] },
@@ -239,18 +259,49 @@ const satelliteBlobUrlCache = new Map();
 const satelliteBlobUrlOrder = [];
 const satelliteTileStyleCache = new Map();
 const satelliteTileStyleOrder = [];
-let satelliteRadiationColorEnabled = true;
+let satelliteRadiationColorEnabled = false;
 
 function updateSatelliteStylePanelVisibility() {
-  if (!satelliteStylePanelEl) return;
-  satelliteStylePanelEl.classList.toggle(
+  satelliteStylePanelEl?.classList.toggle(
+    "hidden",
+    activeSource !== SOURCE_SATELLITE,
+  );
+  mobileSatelliteStylePanelEl?.classList.toggle(
     "hidden",
     activeSource !== SOURCE_SATELLITE,
   );
 }
 
+function syncSatelliteModeControls() {
+  const mode = satelliteRadiationColorEnabled ? "cloudtop" : "rgb";
+  if (satelliteColorModeEl) satelliteColorModeEl.value = mode;
+  if (mobileSatelliteColorToggleEl) {
+    mobileSatelliteColorToggleEl.checked = satelliteRadiationColorEnabled;
+  }
+}
+
+async function applySatelliteMode(enabled) {
+  const nextEnabled = Boolean(enabled);
+  if (nextEnabled === satelliteRadiationColorEnabled) {
+    syncSatelliteModeControls();
+    return;
+  }
+  satelliteRadiationColorEnabled = nextEnabled;
+  syncSatelliteModeControls();
+  clearSatelliteStyleCaches();
+  if (activeSource !== SOURCE_SATELLITE) return;
+  satelliteLayer?.setSource(null);
+  setStatus("Применение спутникового режима...");
+  try {
+    await switchSource(SOURCE_SATELLITE);
+  } catch (e) {
+    console.warn("Satellite style switch failed:", e);
+    setStatus(`Ошибка переключения спутникового режима: ${e.message}`);
+  }
+}
+
 function getSatelliteStyleCacheKey(sourceUrl) {
-  const mode = satelliteRadiationColorEnabled ? "cta" : "raw";
+  const mode = satelliteRadiationColorEnabled ? "cloudtop" : "rgb";
   return `${mode}|${sourceUrl}`;
 }
 
@@ -298,12 +349,41 @@ function setPrecipInfo(text) {
   if (crosshairInfoEl) crosshairInfoEl.textContent = text;
 }
 
+function isMobileLayout() {
+  return window.matchMedia("(max-width: 640px)").matches;
+}
+
+function setSourceSelectValue(value) {
+  const next = String(value || SOURCE_HD);
+  const hasDesktop = Array.from(sourceLayerSelectEl?.options || []).some(
+    (opt) => opt.value === next,
+  );
+  const hasMobile = Array.from(mobileSourceLayerSelectEl?.options || []).some(
+    (opt) => opt.value === next,
+  );
+  if (hasDesktop && sourceLayerSelectEl) sourceLayerSelectEl.value = next;
+  if (hasMobile && mobileSourceLayerSelectEl)
+    mobileSourceLayerSelectEl.value = next;
+}
+
+function setMobileMenuOpen(open) {
+  if (!mobileMenuDrawerEl || !mobileMenuBackdropEl) return;
+  const isOpen = Boolean(open);
+  mobileMenuDrawerEl.classList.toggle("hidden", !isOpen);
+  mobileMenuBackdropEl.classList.toggle("hidden", !isOpen);
+  mobileMenuDrawerEl.classList.toggle("open", isOpen);
+  mobileMenuDrawerEl.setAttribute("aria-hidden", String(!isOpen));
+  mobileMenuToggleBtnEl?.setAttribute("aria-expanded", String(isOpen));
+}
+
 function setCrosshairMode(enabled) {
-  crosshairMode = Boolean(enabled);
+  const supported = activeSource !== SOURCE_SATELLITE;
+  crosshairMode = supported && Boolean(enabled);
   if (crosshairBtnEl) crosshairBtnEl.classList.toggle("active", crosshairMode);
+  if (crosshairBtnEl) crosshairBtnEl.disabled = !supported;
   if (mapCrosshairEl) mapCrosshairEl.classList.toggle("hidden", !crosshairMode);
   if (crosshairInfoEl)
-    crosshairInfoEl.classList.toggle("hidden", !crosshairMode);
+    crosshairInfoEl.classList.toggle("hidden", !crosshairMode || !supported);
   if (crosshairMode) {
     inspectPrecipAtCrosshairCenter().catch(() => {});
   }
@@ -321,51 +401,10 @@ function getLegendConfigForSource(sourceKey) {
   );
 }
 
-function renderActiveLegend() {
-  if (!legendRowsEl) return;
-  if (activeSource === SOURCE_SATELLITE) {
-    if (legendTitleTextEl) {
-      legendTitleTextEl.textContent = satelliteRadiationColorEnabled
-        ? "Легенда: спутник (Tрад и примерная ВГО)"
-        : "Легенда: спутник";
-    }
-    legendRowsEl.innerHTML = "";
-    if (satelliteRadiationColorEnabled) {
-      for (const stop of SATELLITE_CTA_STOPS) {
-        const row = document.createElement("tr");
-        const colorCell = document.createElement("td");
-        const textCell = document.createElement("td");
-        const swatch = document.createElement("span");
-        const hKm = estimateCloudTopHeightKmByBt(stop.t);
-        swatch.className = "palette-color";
-        swatch.style.background = `rgb(${stop.rgb[0]}, ${stop.rgb[1]}, ${stop.rgb[2]})`;
-        colorCell.appendChild(swatch);
-        textCell.textContent = `${stop.t.toFixed(0)}°C -> ~${hKm.toFixed(1)} км`;
-        row.appendChild(colorCell);
-        row.appendChild(textCell);
-        legendRowsEl.appendChild(row);
-      }
-    } else {
-      const row = document.createElement("tr");
-      const colorCell = document.createElement("td");
-      const textCell = document.createElement("td");
-      const swatch = document.createElement("span");
-      swatch.className = "palette-color";
-      swatch.style.background = "#d0d7de";
-      colorCell.appendChild(swatch);
-      textCell.textContent =
-        'Включите "Цвет по радиационной температуре" для легенды Tрад и ВГО.';
-      row.appendChild(colorCell);
-      row.appendChild(textCell);
-      legendRowsEl.appendChild(row);
-    }
-    return;
-  }
-
-  const cfg = getLegendConfigForSource(activeSource);
-  if (legendTitleTextEl) legendTitleTextEl.textContent = `Легенда`;
-  legendRowsEl.innerHTML = "";
-  for (const item of cfg.items) {
+function renderLegendRows(rowsEl, items) {
+  if (!rowsEl) return;
+  rowsEl.innerHTML = "";
+  for (const item of items) {
     const row = document.createElement("tr");
     const colorCell = document.createElement("td");
     const textCell = document.createElement("td");
@@ -376,8 +415,24 @@ function renderActiveLegend() {
     textCell.textContent = item.label;
     row.appendChild(colorCell);
     row.appendChild(textCell);
-    legendRowsEl.appendChild(row);
+    rowsEl.appendChild(row);
   }
+}
+
+function renderActiveLegend() {
+  if (activeSource === SOURCE_SATELLITE) {
+    legendPanelEl?.classList.add("hidden");
+    mobileLegendPanelEl?.classList.add("hidden");
+    return;
+  }
+  legendPanelEl?.classList.remove("hidden");
+  mobileLegendPanelEl?.classList.remove("hidden");
+
+  const cfg = getLegendConfigForSource(activeSource);
+  if (legendTitleTextEl) legendTitleTextEl.textContent = `Легенда`;
+  if (mobileLegendTitleTextEl) mobileLegendTitleTextEl.textContent = "Легенда";
+  renderLegendRows(legendRowsEl, cfg.items);
+  renderLegendRows(mobileLegendRowsEl, cfg.items);
 }
 
 function clamp01(v) {
@@ -422,6 +477,21 @@ const SATELLITE_CTA_STOPS = [
   { t: 50, rgb: [22, 22, 22] },
 ];
 
+const SATELLITE_METEOLOGIX_STOPS = [
+  { t: -92, rgb: [255, 254, 210] },
+  { t: -82, rgb: [255, 248, 174] },
+  { t: -72, rgb: [250, 236, 132] },
+  { t: -62, rgb: [240, 220, 114] },
+  { t: -52, rgb: [221, 204, 132] },
+  { t: -42, rgb: [201, 195, 166] },
+  { t: -30, rgb: [176, 177, 182] },
+  { t: -18, rgb: [151, 154, 164] },
+  { t: -6, rgb: [124, 130, 146] },
+  { t: 8, rgb: [98, 106, 124] },
+  { t: 24, rgb: [76, 84, 103] },
+  { t: 50, rgb: [56, 62, 82] },
+];
+
 function ctaLikeRgbByBt(bt) {
   if (bt <= SATELLITE_CTA_STOPS[0].t) return SATELLITE_CTA_STOPS[0].rgb;
   const last = SATELLITE_CTA_STOPS[SATELLITE_CTA_STOPS.length - 1];
@@ -429,6 +499,23 @@ function ctaLikeRgbByBt(bt) {
   for (let i = 1; i < SATELLITE_CTA_STOPS.length; i++) {
     const prev = SATELLITE_CTA_STOPS[i - 1];
     const next = SATELLITE_CTA_STOPS[i];
+    if (bt > next.t) continue;
+    const k = clamp01((bt - prev.t) / (next.t - prev.t));
+    return lerpColor(prev.rgb, next.rgb, k);
+  }
+  return last.rgb;
+}
+
+function meteologixLikeRgbByBt(bt) {
+  if (bt <= SATELLITE_METEOLOGIX_STOPS[0].t) {
+    return SATELLITE_METEOLOGIX_STOPS[0].rgb;
+  }
+  const last =
+    SATELLITE_METEOLOGIX_STOPS[SATELLITE_METEOLOGIX_STOPS.length - 1];
+  if (bt >= last.t) return last.rgb;
+  for (let i = 1; i < SATELLITE_METEOLOGIX_STOPS.length; i++) {
+    const prev = SATELLITE_METEOLOGIX_STOPS[i - 1];
+    const next = SATELLITE_METEOLOGIX_STOPS[i];
     if (bt > next.t) continue;
     const k = clamp01((bt - prev.t) / (next.t - prev.t));
     return lerpColor(prev.rgb, next.rgb, k);
@@ -529,12 +616,19 @@ async function styleSatelliteTileCTA(blob) {
     const b = data[i + 2];
     const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     const bt = pseudoBtCByLuma(luma);
-    const [nr, ng, nb] = ctaLikeRgbByBt(bt);
-    const coldNorm = Math.pow(clamp01((-35 - bt) / 45), 0.9);
+    const [nr, ng, nb] = satelliteRadiationColorEnabled
+      ? ctaLikeRgbByBt(bt)
+      : meteologixLikeRgbByBt(bt);
+    const coldNorm = Math.pow(clamp01((-32 - bt) / 48), 0.9);
     data[i] = nr;
     data[i + 1] = ng;
     data[i + 2] = nb;
-    data[i + 3] = Math.max(1, Math.round(a * (0.72 + 0.24 * coldNorm)));
+    const alphaBase = satelliteRadiationColorEnabled ? 0.72 : 0.75;
+    const alphaBoost = satelliteRadiationColorEnabled ? 0.24 : 0.2;
+    data[i + 3] = Math.max(
+      1,
+      Math.round(a * (alphaBase + alphaBoost * coldNorm)),
+    );
   }
   ctx.putImageData(imageData, 0, 0);
   return await new Promise((resolve, reject) => {
@@ -672,8 +766,10 @@ function getSatelliteTileSource(urlTemplate) {
 function setPlaybackControlsEnabled(enabled) {
   const state = !enabled;
   if (playBtnEl) playBtnEl.disabled = state;
+  if (firstBtnEl) firstBtnEl.disabled = state;
   if (prevBtnEl) prevBtnEl.disabled = state;
   if (nextBtnEl) nextBtnEl.disabled = state;
+  if (lastBtnEl) lastBtnEl.disabled = state;
   if (timelineEl) timelineEl.disabled = state;
   if (playbackFrameCountEl) playbackFrameCountEl.disabled = state;
 }
@@ -962,7 +1058,7 @@ function createMap() {
   });
   map.on("moveend", () => {
     inspectPrecipAtCrosshairCenter().catch(() => {});
-    refreshLightningOverlay().catch(() => {});
+    updateLightningVisibilityForFrame(true);
   });
 
   map.on("pointerdown", (event) => {
@@ -1154,7 +1250,11 @@ function getLightningViewBBox4326() {
   if (!Array.isArray(size) || size.length < 2) return null;
   const extent3857 = map.getView()?.calculateExtent?.(size);
   if (!Array.isArray(extent3857) || extent3857.length < 4) return null;
-  const extent4326 = ol.proj.transformExtent(extent3857, "EPSG:3857", "EPSG:4326");
+  const extent4326 = ol.proj.transformExtent(
+    extent3857,
+    "EPSG:3857",
+    "EPSG:4326",
+  );
   if (!Array.isArray(extent4326) || extent4326.length < 4) return null;
   return extent4326;
 }
@@ -1180,7 +1280,8 @@ function showLightningPopup(coordinate, strikeTime, ageMinutes) {
 }
 
 function handleLightningFeatureClick(event) {
-  if (!map || !lightningOverlayEnabled || !lightningLayer?.getVisible?.()) return false;
+  if (!map || !lightningOverlayEnabled || !lightningLayer?.getVisible?.())
+    return false;
   let picked = null;
   map.forEachFeatureAtPixel(
     event.pixel,
@@ -1193,13 +1294,36 @@ function handleLightningFeatureClick(event) {
   );
   if (!picked) return false;
   const coordinate = picked.getGeometry?.()?.getCoordinates?.();
-  showLightningPopup(coordinate, picked.get("strikeTime"), picked.get("ageMinutes"));
+  showLightningPopup(
+    coordinate,
+    picked.get("strikeTime"),
+    picked.get("ageMinutes"),
+  );
   return true;
 }
 
 function clearLightningLayer() {
   lightningLayer?.getSource?.()?.clear();
   hideLightningPopup();
+}
+
+function shouldShowLightningOnCurrentFrame() {
+  if (!lightningOverlayEnabled) return false;
+  if (isPlaying) return false;
+  if (!Array.isArray(frames) || !frames.length) return false;
+  return currentFrame === frames.length - 1;
+}
+
+function updateLightningVisibilityForFrame(refreshIfVisible = false) {
+  const visible = shouldShowLightningOnCurrentFrame();
+  lightningLayer?.setVisible(visible);
+  if (!visible) {
+    hideLightningPopup();
+    return;
+  }
+  if (refreshIfVisible) {
+    refreshLightningOverlay().catch(() => {});
+  }
 }
 
 function getLightningPointStyleByAge(ageMinutes) {
@@ -1234,7 +1358,9 @@ function renderLightningStrikes(strikes) {
     const lon = Number(s.lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
     const tMs = Date.parse(s.time || "");
-    const ageMin = Number.isFinite(tMs) ? Math.max(0, (nowMs - tMs) / 60000) : 999;
+    const ageMin = Number.isFinite(tMs)
+      ? Math.max(0, (nowMs - tMs) / 60000)
+      : 999;
     const feature = new ol.Feature({
       geometry: new ol.geom.Point(ol.proj.fromLonLat([lon, lat])),
     });
@@ -1247,8 +1373,8 @@ function renderLightningStrikes(strikes) {
 }
 
 async function refreshLightningOverlay() {
-  if (!lightningOverlayEnabled) {
-    clearLightningLayer();
+  if (!shouldShowLightningOnCurrentFrame()) {
+    hideLightningPopup();
     return;
   }
   const reqToken = ++lightningRequestToken;
@@ -1265,9 +1391,12 @@ async function refreshLightningOverlay() {
     withBBox.set("north", String(bbox[3]));
   }
   try {
-    const resp = await fetch(`/api/lightning/gld360/latest?${withBBox.toString()}`, {
-      cache: "no-store",
-    });
+    const resp = await fetch(
+      `/api/lightning/gld360/latest?${withBBox.toString()}`,
+      {
+        cache: "no-store",
+      },
+    );
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const payload = await resp.json();
     if (reqToken !== lightningRequestToken) return;
@@ -1277,9 +1406,12 @@ async function refreshLightningOverlay() {
       return;
     }
     // Fallback: if local bbox has no strikes, fetch wider area.
-    const respWide = await fetch(`/api/lightning/gld360/latest?${params.toString()}`, {
-      cache: "no-store",
-    });
+    const respWide = await fetch(
+      `/api/lightning/gld360/latest?${params.toString()}`,
+      {
+        cache: "no-store",
+      },
+    );
     if (!respWide.ok) throw new Error(`HTTP ${respWide.status}`);
     const payloadWide = await respWide.json();
     if (reqToken !== lightningRequestToken) return;
@@ -1294,12 +1426,11 @@ async function refreshLightningOverlay() {
 function setLightningOverlayEnabled(enabled) {
   lightningOverlayEnabled = Boolean(enabled);
   lightningToggleBtnEl?.classList.toggle("active", lightningOverlayEnabled);
-  lightningLayer?.setVisible(lightningOverlayEnabled);
   if (!lightningOverlayEnabled) {
     clearLightningLayer();
     return;
   }
-  refreshLightningOverlay().catch(() => {});
+  updateLightningVisibilityForFrame(true);
 }
 
 function setFrameExtentAndUrl(extent, url, projection, interpolate = false) {
@@ -1538,6 +1669,7 @@ async function getStyledFrameUrl(url) {
 
 async function inspectPrecipAtCrosshairCenter() {
   if (!crosshairMode) return;
+  if (activeSource === SOURCE_SATELLITE) return;
   if (!map || !frames.length) return;
   const frame = frames[currentFrame];
   if (!frame?.url) return;
@@ -1581,20 +1713,6 @@ async function inspectPrecipAtCrosshairCenter() {
     const g = px.data[i + 1];
     const b = px.data[i + 2];
     const a = px.data[i + 3];
-    if (activeSource === SOURCE_SATELLITE) {
-      if (a <= 2) {
-        setPrecipInfo("В перекрестии: прозрачный пиксель спутника");
-        return;
-      }
-      const bt = satelliteRadiationColorEnabled
-        ? estimateBtBySatelliteColor(r, g, b)
-        : pseudoBtCByLuma(0.2126 * r + 0.7152 * g + 0.0722 * b);
-      const hKm = estimateCloudTopHeightKmByBt(bt);
-      setPrecipInfo(
-        `В перекрестии: Tрад ~ ${bt.toFixed(1)}°C; ВГО ~ ${hKm.toFixed(1)} км`,
-      );
-      return;
-    }
     const label = getLegendLabelByRgb(activeSource, r, g, b, a);
     if (!label) {
       setPrecipInfo(`В перекрестии: неопределено (RGB ${r},${g},${b})`);
@@ -1637,17 +1755,13 @@ async function loadNowcastMeta(preferredLayers = "") {
 }
 
 function rebuildSourceOptions() {
-  if (!sourceLayerSelectEl) return;
-  const prev = sourceLayerSelectEl.value || SOURCE_HD;
-  sourceLayerSelectEl.innerHTML = "";
-  const hdOpt = document.createElement("option");
-  hdOpt.value = SOURCE_HD;
-  hdOpt.textContent = "Опасные явления HD";
-  sourceLayerSelectEl.appendChild(hdOpt);
-  const satOpt = document.createElement("option");
-  satOpt.value = SOURCE_SATELLITE;
-  satOpt.textContent = SATELLITE_LAYER_LABEL;
-  sourceLayerSelectEl.appendChild(satOpt);
+  if (!sourceLayerSelectEl && !mobileSourceLayerSelectEl) return;
+  const prev =
+    sourceLayerSelectEl?.value || mobileSourceLayerSelectEl?.value || SOURCE_HD;
+  const options = [
+    { value: SOURCE_HD, label: "Опасные явления HD" },
+    { value: SOURCE_SATELLITE, label: SATELLITE_LAYER_LABEL },
+  ];
 
   const availableNames = new Set(
     (Array.isArray(nowcastMeta?.layers) ? nowcastMeta.layers : [])
@@ -1657,16 +1771,29 @@ function rebuildSourceOptions() {
 
   for (const name of NOWCAST_LAYER_ORDER) {
     if (!availableNames.has(name)) continue;
-    const opt = document.createElement("option");
-    opt.value = name; // техническое имя слоя для API
-    opt.textContent = NOWCAST_LAYER_LABELS[name] || name;
-    sourceLayerSelectEl.appendChild(opt);
+    options.push({
+      value: name,
+      label: NOWCAST_LAYER_LABELS[name] || name,
+    });
   }
-  sourceLayerSelectEl.value = Array.from(sourceLayerSelectEl.options).some(
-    (opt) => opt.value === prev,
-  )
+
+  const fillSelect = (selectEl) => {
+    if (!selectEl) return;
+    selectEl.innerHTML = "";
+    for (const item of options) {
+      const opt = document.createElement("option");
+      opt.value = item.value;
+      opt.textContent = item.label;
+      selectEl.appendChild(opt);
+    }
+  };
+  fillSelect(sourceLayerSelectEl);
+  fillSelect(mobileSourceLayerSelectEl);
+
+  const selected = options.some((item) => item.value === prev)
     ? prev
     : SOURCE_HD;
+  setSourceSelectValue(selected);
 }
 
 async function loadNowcastFrames(layerName) {
@@ -1731,7 +1858,7 @@ async function loadNowcastFrames(layerName) {
 }
 
 async function loadSatelliteFrames() {
-  const cacheMode = satelliteRadiationColorEnabled ? "color" : "raw";
+  const cacheMode = "rgb";
   const framesCacheKey = `auto|${SATELLITE_FRAME_LIMIT}|${SATELLITE_CADENCE_MIN}|${cacheMode}`;
   if (satelliteFramesByKey.has(framesCacheKey)) {
     return satelliteFramesByKey.get(framesCacheKey);
@@ -1768,6 +1895,8 @@ async function loadSatelliteFrames() {
       timestamp: new Date(f.time || f.timestamp || Date.now()),
       projection: f.projection || "EPSG:4326",
       imageExtent: Array.isArray(f.imageExtent) ? f.imageExtent : geoBounds,
+      imageWidth: width,
+      imageHeight: height,
     }))
     .filter(
       (f) =>
@@ -1785,7 +1914,8 @@ function warmNowcastFramesInBackground(layer, framesList) {
   (async () => {
     for (let i = 0; i < target.length; i++) {
       const frame = target[i];
-      if (!frame?.sourceUrl || nowcastBlobUrlCache.has(frame.sourceUrl)) continue;
+      if (!frame?.sourceUrl || nowcastBlobUrlCache.has(frame.sourceUrl))
+        continue;
       try {
         const localUrl = await getNowcastBlobUrlCached(frame.sourceUrl);
         frame.url = localUrl;
@@ -1995,17 +2125,20 @@ async function removeNowcastRadarBackground(blob) {
 }
 
 async function switchSource(layerOrHd) {
+  const switchToken = ++sourceSwitchToken;
   const next = String(layerOrHd || SOURCE_HD);
   stopPlayback(false);
 
   if (next === SOURCE_SATELLITE) {
     const satelliteFrames = await loadSatelliteFrames();
+    if (switchToken !== sourceSwitchToken) return;
     if (!satelliteFrames.length) {
       setStatus("Спутниковые кадры сейчас недоступны");
-      sourceLayerSelectEl.value = activeSource || SOURCE_HD;
+      setSourceSelectValue(activeSource || SOURCE_HD);
       return;
     }
     activeSource = SOURCE_SATELLITE;
+    setSourceSelectValue(activeSource);
     renderActiveLegend();
     baseLayer?.setVisible(false);
     frameLayer?.setVisible(true);
@@ -2013,11 +2146,13 @@ async function switchSource(layerOrHd) {
     satelliteReferenceLayer?.setVisible(true);
     frameLayer?.setOpacity(1);
     updateSatelliteStylePanelVisibility();
+    setCrosshairMode(crosshairMode);
     setPlaybackControlsEnabled(true);
     frames = satelliteFrames.slice();
     currentFrame = Math.max(0, frames.length - 1);
     timelineEl.max = String(Math.max(0, frames.length - 1));
     await renderFrame(currentFrame);
+    if (switchToken !== sourceSwitchToken) return;
     if (frames.length > 1) startPlayback();
     const resolved = satelliteResolvedLayer
       ? ` [${satelliteResolvedLayer}]`
@@ -2030,6 +2165,7 @@ async function switchSource(layerOrHd) {
 
   if (next === SOURCE_HD) {
     activeSource = SOURCE_HD;
+    setSourceSelectValue(activeSource);
     renderActiveLegend();
     baseLayer?.setVisible(true);
     frameLayer?.setVisible(true);
@@ -2037,6 +2173,7 @@ async function switchSource(layerOrHd) {
     satelliteReferenceLayer?.setVisible(false);
     frameLayer?.setOpacity(HD_LAYER_OPACITY);
     updateSatelliteStylePanelVisibility();
+    setCrosshairMode(crosshairMode);
     setPlaybackControlsEnabled(true);
     frames = hdFrames.slice();
     timelineEl.max = String(Math.max(0, frames.length - 1));
@@ -2044,17 +2181,20 @@ async function switchSource(layerOrHd) {
       ? Math.min(currentFrame, frames.length - 1)
       : 0;
     await renderFrame(startIdx);
+    if (switchToken !== sourceSwitchToken) return;
     if (frames.length > 1) startPlayback();
     setStatus(`Слой: ${getSourceDisplayName(SOURCE_HD)}`);
     return;
   }
 
   const nowcastFrames = await loadNowcastFrames(next);
+  if (switchToken !== sourceSwitchToken) return;
   if (!nowcastFrames.length) {
     setStatus(`4x4 слой ${next}: кадры недоступны`);
     return;
   }
   activeSource = next;
+  setSourceSelectValue(activeSource);
   renderActiveLegend();
   baseLayer?.setVisible(true);
   frameLayer?.setVisible(true);
@@ -2062,11 +2202,13 @@ async function switchSource(layerOrHd) {
   satelliteReferenceLayer?.setVisible(false);
   frameLayer?.setOpacity(NOWCAST_LAYER_OPACITY);
   updateSatelliteStylePanelVisibility();
+  setCrosshairMode(crosshairMode);
   setPlaybackControlsEnabled(true);
   frames = nowcastFrames.slice();
   currentFrame = Math.max(0, frames.length - 1);
   timelineEl.max = String(Math.max(0, frames.length - 1));
   await renderFrame(currentFrame);
+  if (switchToken !== sourceSwitchToken) return;
   if (frames.length > 1) startPlayback();
   setStatus(`Слой: ${getSourceDisplayName(next)} (кадров: ${frames.length})`);
 }
@@ -2087,6 +2229,7 @@ async function renderFrame(index) {
     timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
     const layerLabel = getSourceDisplayName(activeSource);
     setStatus(`кадр ${currentFrame + 1} / ${frames.length}`);
+    updateLightningVisibilityForFrame(true);
     inspectPrecipAtCrosshairCenter().catch(() => {});
     return;
   }
@@ -2099,6 +2242,26 @@ async function renderFrame(index) {
         : geoBounds;
   let displayUrl = frame.url;
   if (frame?.url) {
+    if (
+      activeSource !== SOURCE_HD &&
+      activeSource !== SOURCE_SATELLITE &&
+      frame?.sourceUrl
+    ) {
+      try {
+        const cleanedNowcastUrl = await getNowcastBlobUrlCached(
+          frame.sourceUrl,
+        );
+        if (cleanedNowcastUrl) {
+          frame.url = cleanedNowcastUrl;
+          displayUrl = cleanedNowcastUrl;
+        }
+      } catch (e) {
+        console.warn(
+          "Nowcast cleanup on-demand failed, fallback to raw frame:",
+          e,
+        );
+      }
+    }
     if (
       !Number.isFinite(Number(frame.imageWidth)) ||
       Number(frame.imageWidth) <= 1 ||
@@ -2136,6 +2299,7 @@ async function renderFrame(index) {
   timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
   const layerLabel = getSourceDisplayName(activeSource);
   setStatus(`${layerLabel}: кадр ${currentFrame + 1} / ${frames.length}`);
+  updateLightningVisibilityForFrame(true);
   inspectPrecipAtCrosshairCenter().catch(() => {});
 }
 
@@ -2147,6 +2311,7 @@ function stopPlayback(jumpToLast = true) {
     timer = null;
   }
   updatePlayButton();
+  updateLightningVisibilityForFrame(false);
   if (jumpToLast && frames.length) {
     renderFrame(frames.length - 1);
   }
@@ -2156,6 +2321,7 @@ function startPlayback() {
   if (isPlaying || frames.length <= 1) return;
   isPlaying = true;
   playbackGeneration++;
+  updateLightningVisibilityForFrame(false);
   const generation = playbackGeneration;
   const startIdx = getPlaybackStartIndex();
   if (currentFrame < startIdx || currentFrame >= frames.length) {
@@ -2173,6 +2339,11 @@ function bindControls() {
     if (isPlaying) stopPlayback();
     else startPlayback();
   });
+  firstBtnEl?.addEventListener("click", () => {
+    stopPlayback(false);
+    const startIdx = getPlaybackStartIndex();
+    renderFrame(startIdx);
+  });
   prevBtnEl.addEventListener("click", () => {
     stopPlayback(false);
     renderFrame(currentFrame - 1);
@@ -2180,6 +2351,11 @@ function bindControls() {
   nextBtnEl.addEventListener("click", () => {
     stopPlayback(false);
     renderFrame(currentFrame + 1);
+  });
+  lastBtnEl?.addEventListener("click", () => {
+    stopPlayback(false);
+    if (!frames.length) return;
+    renderFrame(frames.length - 1);
   });
   timelineEl.addEventListener("input", () => {
     stopPlayback(false);
@@ -2206,6 +2382,24 @@ function bindControls() {
   legendToggleEl?.addEventListener("click", () => {
     legendPanelEl?.classList.toggle("legend-collapsed");
   });
+  mobileMenuToggleBtnEl?.addEventListener("click", () => {
+    setMobileMenuOpen(true);
+  });
+  mobileMenuCloseBtnEl?.addEventListener("click", () => {
+    setMobileMenuOpen(false);
+  });
+  mobileMenuBackdropEl?.addEventListener("click", () => {
+    setMobileMenuOpen(false);
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    setMobileMenuOpen(false);
+  });
+  window.addEventListener("resize", () => {
+    if (!isMobileLayout()) {
+      setMobileMenuOpen(false);
+    }
+  });
   playbackFrameCountEl?.addEventListener("change", () => {
     if (!frames.length) return;
     if (activeSource !== SOURCE_HD) {
@@ -2226,6 +2420,7 @@ function bindControls() {
     renderFrame(startIdx);
   });
   sourceLayerSelectEl?.addEventListener("change", async () => {
+    setSourceSelectValue(sourceLayerSelectEl.value);
     try {
       await switchSource(sourceLayerSelectEl.value);
     } catch (e) {
@@ -2233,20 +2428,23 @@ function bindControls() {
       setStatus(`Ошибка переключения слоя: ${e.message}`);
     }
   });
-  satelliteTempColorToggleEl?.addEventListener("change", async () => {
-    const enabled = Boolean(satelliteTempColorToggleEl.checked);
-    if (enabled === satelliteRadiationColorEnabled) return;
-    satelliteRadiationColorEnabled = enabled;
-    clearSatelliteStyleCaches();
-    if (activeSource !== SOURCE_SATELLITE) return;
-    satelliteLayer?.setSource(null);
-    setStatus("Применение спутникового стиля...");
+  mobileSourceLayerSelectEl?.addEventListener("change", async () => {
+    const selected = mobileSourceLayerSelectEl.value || SOURCE_HD;
+    setSourceSelectValue(selected);
     try {
-      await switchSource(SOURCE_SATELLITE);
+      await switchSource(selected);
+      if (isMobileLayout()) setMobileMenuOpen(false);
     } catch (e) {
-      console.warn("Satellite style toggle failed:", e);
-      setStatus(`Ошибка стиля спутника: ${e.message}`);
+      console.warn("Source switch failed (mobile):", e);
+      setStatus(`Ошибка переключения слоя: ${e.message}`);
     }
+  });
+  satelliteColorModeEl?.addEventListener("change", async () => {
+    const nextMode = String(satelliteColorModeEl.value || "rgb");
+    await applySatelliteMode(nextMode === "cloudtop");
+  });
+  mobileSatelliteColorToggleEl?.addEventListener("change", async () => {
+    await applySatelliteMode(Boolean(mobileSatelliteColorToggleEl.checked));
   });
 }
 
@@ -2291,7 +2489,7 @@ async function refreshData() {
     if (activeSource !== SOURCE_HD) {
       // Не очищаем кэш слоёв при активном non-HD режиме, чтобы повторное
       // переключение было мгновенным. Актуализация идёт периодическим прогревом сервера.
-      refreshLightningOverlay().catch(() => {});
+      updateLightningVisibilityForFrame(false);
     }
     upsertRadarLayer();
     if (activeSource !== SOURCE_HD) return;
@@ -2317,7 +2515,7 @@ async function refreshData() {
       currentFrame = frames.length - 1;
     }
     renderFrame(currentFrame);
-    refreshLightningOverlay().catch(() => {});
+    updateLightningVisibilityForFrame(true);
   } catch (e) {
     console.warn("Refresh data failed:", e);
   }
@@ -2325,6 +2523,8 @@ async function refreshData() {
 
 async function init() {
   try {
+    setMobileMenuOpen(false);
+    syncSatelliteModeControls();
     await loadData();
     frames = hdFrames.slice();
     createMap();
@@ -2346,7 +2546,7 @@ async function init() {
     timelineEl.max = String(Math.max(0, frames.length - 1));
     timelineEl.value = "0";
     await renderFrame(0);
-    await refreshLightningOverlay();
+    updateLightningVisibilityForFrame(true);
     if (frames.length > 1) startPlayback();
     else updatePlayButton();
     dataRefreshTimer = setInterval(refreshData, DATA_REFRESH_MS);

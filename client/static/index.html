@@ -14,6 +14,9 @@
         padding: 0;
         box-sizing: border-box;
       }
+      .hidden {
+        display: none !important;
+      }
       body {
         font-family: "Segoe UI", system-ui, sans-serif;
         background: #ffffff;
@@ -29,6 +32,121 @@
         right: 0;
         bottom: 0;
         z-index: 1;
+      }
+      .mobile-menu-toggle,
+      .mobile-menu-backdrop,
+      .mobile-menu-drawer {
+        display: none;
+      }
+      .mobile-menu-toggle {
+        position: absolute;
+        top: calc(8px + env(safe-area-inset-top, 0px));
+        right: 8px;
+        z-index: 1300;
+        width: 38px;
+        height: 38px;
+        border-radius: 10px;
+        border: 1px solid #666666;
+        background: rgba(255, 255, 255, 0.97);
+        color: #24292f;
+        font-size: 20px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .mobile-menu-backdrop {
+        position: absolute;
+        inset: 0;
+        z-index: 1240;
+        background: rgba(15, 23, 42, 0.34);
+      }
+      .mobile-menu-drawer {
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: min(86vw, 340px);
+        z-index: 1250;
+        background: rgba(255, 255, 255, 0.985);
+        border-left: 1px solid #d0d7de;
+        box-shadow: 0 8px 32px rgba(31, 35, 40, 0.22);
+        padding: calc(10px + env(safe-area-inset-top, 0px)) 10px
+          calc(10px + env(safe-area-inset-bottom, 0px));
+        overflow-y: auto;
+        transform: translateX(105%);
+        transition: transform 0.24s ease;
+      }
+      .mobile-menu-drawer.open {
+        transform: translateX(0);
+      }
+      .mobile-menu-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 8px;
+      }
+      .mobile-menu-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #57606a;
+      }
+      .mobile-menu-close {
+        width: 30px;
+        height: 30px;
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        background: #f6f8fa;
+        color: #24292f;
+        cursor: pointer;
+      }
+      .mobile-menu-section {
+        background: #ffffff;
+        border: 1px solid #d0d7de;
+        border-radius: 10px;
+        padding: 9px;
+        margin-bottom: 8px;
+      }
+      .mobile-section-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: #57606a;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 6px;
+      }
+      .mobile-source-select {
+        width: 100%;
+        background: #ffffff;
+        color: #24292f;
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        padding: 6px 8px;
+        outline: none;
+      }
+      .mobile-satellite-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: #24292f;
+      }
+      .mobile-legend-wrap {
+        max-height: min(56vh, 420px);
+        overflow: auto;
+      }
+      .mobile-legend-wrap table {
+        border-collapse: collapse;
+      }
+      .mobile-legend-wrap td {
+        padding: 2px 6px;
+        vertical-align: middle;
+        font-size: 12px;
+      }
+      .mobile-legend-wrap .palette-color {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border-radius: 2px;
+        border: 1px solid #d0d7de;
       }
       .map-crosshair {
         position: absolute;
@@ -126,6 +244,9 @@
       #timeline {
         min-width: 140px;
       }
+      .timeline-hidden {
+        display: none !important;
+      }
       .control-panel h3 {
         font-size: 12px;
         color: #57606a;
@@ -135,9 +256,20 @@
       }
       .timeline-row {
         display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+        margin-bottom: 6px;
+      }
+      .transport-row {
+        display: flex;
         align-items: center;
-        gap: 12px;
-        margin-bottom: 8px;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .tools-row {
+        display: flex;
+        justify-content: left;
       }
       input[type="range"] {
         flex: 1;
@@ -246,6 +378,9 @@
       .legend-panel.legend-collapsed .legend-body {
         display: none;
       }
+      .legend-panel.hidden {
+        display: none;
+      }
       .legend-panel .legend-header {
         display: flex;
         align-items: center;
@@ -294,6 +429,11 @@
         gap: 4px;
         align-items: center;
       }
+      .tool-btns {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
       .step-btn {
         width: 36px;
         height: 36px;
@@ -315,6 +455,31 @@
         background: #eaeef2;
       }
       .step-btn.active {
+        background: #0969da;
+        color: #ffffff;
+        border-color: #0969da;
+      }
+      .tool-btn {
+        width: 28px;
+        height: 28px;
+        border-radius: 7px;
+        border: 1px solid #d0d7de;
+        background: #f6f8fa;
+        color: #0969da;
+        cursor: pointer;
+        font-size: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .tool-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .tool-btn:hover {
+        background: #eaeef2;
+      }
+      .tool-btn.active {
         background: #0969da;
         color: #ffffff;
         border-color: #0969da;
@@ -463,6 +628,17 @@
         body {
           overflow: hidden;
         }
+        .mobile-menu-toggle,
+        .mobile-menu-backdrop,
+        .mobile-menu-drawer {
+          display: block;
+        }
+        .top-left-panels {
+          display: none !important;
+        }
+        .legend-panel {
+          display: none !important;
+        }
         .control-panel {
           left: 8px;
           right: 8px;
@@ -553,6 +729,59 @@
   </head>
   <body>
     <div id="map"></div>
+    <button
+      class="mobile-menu-toggle"
+      id="mobileMenuToggleBtn"
+      type="button"
+      title="Открыть меню"
+      aria-label="Открыть меню"
+    >
+      ☰
+    </button>
+    <div class="mobile-menu-backdrop hidden" id="mobileMenuBackdrop"></div>
+    <aside
+      class="mobile-menu-drawer hidden"
+      id="mobileMenuDrawer"
+      aria-hidden="true"
+    >
+      <div class="mobile-menu-header">
+        <span class="mobile-menu-title">Меню</span>
+        <button
+          class="mobile-menu-close"
+          id="mobileMenuCloseBtn"
+          type="button"
+          title="Закрыть меню"
+          aria-label="Закрыть меню"
+        >
+          ✕
+        </button>
+      </div>
+      <div class="mobile-menu-section">
+        <div class="mobile-section-title">Слой</div>
+        <select
+          class="mobile-source-select"
+          id="mobileSourceLayerSelect"
+          title="Активный слой осадков"
+        >
+          <option value="__hd__">Опасные явления HD</option>
+        </select>
+      </div>
+      <div class="mobile-menu-section hidden" id="mobileSatelliteStylePanel">
+        <div class="mobile-section-title">Спутниковый режим</div>
+        <label class="mobile-satellite-row" for="mobileSatelliteColorToggle">
+          <input type="checkbox" id="mobileSatelliteColorToggle" />
+          <span>Цветной спутник (Cloud Top)</span>
+        </label>
+      </div>
+      <div class="mobile-menu-section" id="mobileLegendPanel">
+        <div class="mobile-section-title" id="mobileLegendTitleText">Легенда</div>
+        <div class="mobile-legend-wrap">
+          <table>
+            <tbody id="mobileLegendRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </aside>
     <div
       class="map-crosshair hidden"
       id="mapCrosshair"
@@ -568,10 +797,13 @@
         </select>
       </div>
       <div class="satellite-style-panel hidden" id="satelliteStylePanel">
-        <div class="panel-title">Спутниковый стиль</div>
-        <label class="toggle-row">
-          <input type="checkbox" id="satelliteTempColor" checked />
-          <span>Цветной</span>
+        <div class="panel-title">Спутниковый режим</div>
+        <label class="toggle-row" for="satelliteColorMode">
+          <span>Отображение:</span>
+          <select id="satelliteColorMode" title="Режим спутникового слоя">
+            <option value="rgb" selected>Спутник HD</option>
+            <option value="cloudtop">Цветной</option>
+          </select>
         </label>
       </div>
     </div>
@@ -595,39 +827,65 @@
     <div class="control-panel">
       <!-- <h3>Таймлайн</h3> -->
       <div class="timeline-row">
-        <div class="step-btns">
-          <button class="step-btn" id="prevBtn" title="Предыдущий кадр">
-            &#9664;
-          </button>
-          <button class="play-btn" id="playBtn" title="Play/Pause">▶</button>
-          <button class="step-btn" id="nextBtn" title="Следующий кадр">
-            &#9654;
-          </button>
-          <button class="step-btn" id="measureBtn" title="Измерить расстояние">
-            📏
-          </button>
-          <button class="step-btn" id="drawBtn" title="Рисовать на карте">
-            ✏️
-          </button>
-          <button
-            class="step-btn"
-            id="crosshairBtn"
-            title="Перекрестье в центре"
-          >
-            ✛
-          </button>
-          <button
-            class="step-btn active"
-            type="button"
-            id="lightningToggleBtn"
-            title="Показывать точки молний"
-          >
-            ⚡
-          </button>
+        <div class="transport-row">
+          <div class="step-btns">
+            <button class="step-btn" id="firstBtn" title="Самый первый кадр">
+              ⏮
+            </button>
+            <button class="step-btn" id="prevBtn" title="Предыдущий кадр">
+              &#9664;
+            </button>
+            <button class="play-btn" id="playBtn" title="Play/Pause">▶</button>
+            <button class="step-btn" id="nextBtn" title="Следующий кадр">
+              &#9654;
+            </button>
+            <button class="step-btn" id="lastBtn" title="Самый последний кадр">
+              ⏭
+            </button>
+          </div>
+          <span class="time-label" id="timeLabel">—</span>
         </div>
-        <input type="range" id="timeline" min="0" max="0" value="0" step="1" />
-        <span class="time-label" id="timeLabel">—</span>
+        <div class="tools-row">
+          <div class="tool-btns">
+            <button
+              class="tool-btn"
+              id="measureBtn"
+              title="Измерить расстояние"
+            >
+              📏
+            </button>
+            <button class="tool-btn" id="drawBtn" title="Рисовать на карте">
+              ✏️
+            </button>
+            <button
+              class="tool-btn"
+              id="crosshairBtn"
+              title="Перекрестье в центре"
+            >
+              ✛
+            </button>
+            <button
+              class="tool-btn active"
+              type="button"
+              id="lightningToggleBtn"
+              title="Показывать точки молний"
+            >
+              ⚡
+            </button>
+          </div>
+        </div>
       </div>
+      <input
+        class="timeline-hidden"
+        type="range"
+        id="timeline"
+        min="0"
+        max="0"
+        value="0"
+        step="1"
+        aria-hidden="true"
+        tabindex="-1"
+      />
       <div class="playback-settings">
         <span>Кадров в цикле:</span>
         <select
@@ -643,6 +901,6 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/ol@10.6.1/dist/ol.js"></script>
-    <script src="/static/app.js?v=20260412_2"></script>
+    <script src="/static/app.js?v=20260415_4"></script>
   </body>
 </html>
