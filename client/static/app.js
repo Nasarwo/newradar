@@ -254,6 +254,8 @@ const NOWCAST_PIXEL_GAP_MAX_SCREEN_PX = 1.25;
 let frameRenderToken = 0;
 let centerProbeToken = 0;
 let viewportSyncTimer = null;
+let nowcastGridOverlayCache = null;
+let nowcastResolutionRerenderTimer = null;
 const nowcastBlobUrlCache = new Map();
 const nowcastBlobUrlOrder = [];
 const satelliteBlobUrlCache = new Map();
@@ -1040,22 +1042,33 @@ function createMap() {
     maxZoom: 10,
   });
 
-  map.on("pointermove", (event) => {
+  const handlePointerTrack = (event) => {
     if (measureMode && measureStart && !measureEnd) {
       measurePointer = event.coordinate.slice();
       renderMeasurement();
     }
     if (drawMode && drawCurrentStroke) {
-      drawCurrentStroke.push(event.coordinate);
-      drawCurrentStrokeFeature.getGeometry().setCoordinates(drawCurrentStroke);
+      drawCurrentStroke.push(event.coordinate.slice());
+      drawCurrentStrokeFeature?.getGeometry?.().setCoordinates(drawCurrentStroke);
     }
-  });
+  };
+  map.on("pointermove", handlePointerTrack);
+  map.on("pointerdrag", handlePointerTrack);
   map.getView().on("change:resolution", () => {
     if (!frames.length) return;
     if (activeSource === SOURCE_HD || activeSource === SOURCE_SATELLITE) return;
-    renderFrame(currentFrame).catch((e) => {
-      console.warn("Nowcast rerender on zoom failed:", e);
-    });
+    nowcastGridOverlayCache = null;
+    if (nowcastResolutionRerenderTimer) {
+      clearTimeout(nowcastResolutionRerenderTimer);
+    }
+    // Перерисовываем nowcast только после паузы в масштабировании,
+    // чтобы экранная сетка не "плавала" во время pinch-zoom.
+    nowcastResolutionRerenderTimer = setTimeout(() => {
+      nowcastResolutionRerenderTimer = null;
+      renderFrame(currentFrame).catch((e) => {
+        console.warn("Nowcast rerender after zoom settle failed:", e);
+      });
+    }, 180);
   });
   map.on("moveend", () => {
     inspectPrecipAtCrosshairCenter().catch(() => {});
@@ -1123,56 +1136,86 @@ function renderNowcastPixelGapOverlay(event) {
   const ctx = event?.context;
   if (!ctx) return;
 
-  const [west, south, east, north] = frame.imageExtent;
-  const topLeft = map.getPixelFromCoordinate([west, north]);
-  const topRight = map.getPixelFromCoordinate([east, north]);
-  const bottomLeft = map.getPixelFromCoordinate([west, south]);
-  if (!topLeft || !topRight || !bottomLeft) return;
+  const frameState = event?.frameState;
+  const viewHints = frameState?.viewHints || [];
+  const isViewAnimating = Boolean(viewHints[0] || viewHints[1]);
 
-  const renderWidthCss = Math.abs(topRight[0] - topLeft[0]);
-  const renderHeightCss = Math.abs(bottomLeft[1] - topLeft[1]);
-  if (!(renderWidthCss > 0 && renderHeightCss > 0)) return;
+  if (!isViewAnimating) {
+    const [west, south, east, north] = frame.imageExtent;
+    const transform = frameState?.coordinateToPixelTransform;
+    if (!Array.isArray(transform) || transform.length < 6) return;
+    const toPixel = (x, y) => [
+      transform[0] * x + transform[1] * y + transform[4],
+      transform[2] * x + transform[3] * y + transform[5],
+    ];
+    const topLeft = toPixel(west, north);
+    const topRight = toPixel(east, north);
+    const bottomLeft = toPixel(west, south);
 
-  const pixelStepXCss = renderWidthCss / width;
-  const pixelStepYCss = renderHeightCss / height;
-  const minStepCss = Math.min(pixelStepXCss, pixelStepYCss);
+    const renderWidthCss = Math.abs(topRight[0] - topLeft[0]);
+    const renderHeightCss = Math.abs(bottomLeft[1] - topLeft[1]);
+    if (!(renderWidthCss > 0 && renderHeightCss > 0)) return;
+
+    const pixelStepXCss = renderWidthCss / width;
+    const pixelStepYCss = renderHeightCss / height;
+    const minStepCss = Math.min(pixelStepXCss, pixelStepYCss);
+    if (
+      !Number.isFinite(minStepCss) ||
+      minStepCss < NOWCAST_PIXEL_GAP_MIN_SCREEN_PX
+    ) {
+      nowcastGridOverlayCache = null;
+      return;
+    }
+
+    const pixelRatio = frameState?.pixelRatio || window.devicePixelRatio || 1;
+    const gapWidthCss = Math.max(
+      0.35,
+      Math.min(NOWCAST_PIXEL_GAP_MAX_SCREEN_PX, minStepCss * 0.16),
+    );
+    const alpha = Math.max(0.08, Math.min(0.24, 0.06 + minStepCss * 0.02));
+    const leftCss = Math.min(topLeft[0], topRight[0]);
+    const rightCss = Math.max(topLeft[0], topRight[0]);
+    const topCss = Math.min(topLeft[1], bottomLeft[1]);
+    const bottomCss = Math.max(topLeft[1], bottomLeft[1]);
+
+    nowcastGridOverlayCache = {
+      frameUrl: frame.url || "",
+      frameExtentKey: frame.imageExtent.join(","),
+      width,
+      height,
+      left: leftCss * pixelRatio,
+      right: rightCss * pixelRatio,
+      top: topCss * pixelRatio,
+      bottom: bottomCss * pixelRatio,
+      stepX: pixelStepXCss * pixelRatio,
+      stepY: pixelStepYCss * pixelRatio,
+      gapWidth: gapWidthCss * pixelRatio,
+      alpha,
+    };
+  }
+
+  const overlay = nowcastGridOverlayCache;
+  if (!overlay) return;
   if (
-    !Number.isFinite(minStepCss) ||
-    minStepCss < NOWCAST_PIXEL_GAP_MIN_SCREEN_PX
-  )
+    overlay.frameUrl !== (frame.url || "") ||
+    overlay.frameExtentKey !== frame.imageExtent.join(",") ||
+    overlay.width !== width ||
+    overlay.height !== height
+  ) {
     return;
-
-  const pixelRatio =
-    event?.frameState?.pixelRatio || window.devicePixelRatio || 1;
-  const gapWidthCss = Math.max(
-    0.35,
-    Math.min(NOWCAST_PIXEL_GAP_MAX_SCREEN_PX, minStepCss * 0.16),
-  );
-  const alpha = Math.max(0.08, Math.min(0.24, 0.06 + minStepCss * 0.02));
-
-  const leftCss = Math.min(topLeft[0], topRight[0]);
-  const rightCss = Math.max(topLeft[0], topRight[0]);
-  const topCss = Math.min(topLeft[1], bottomLeft[1]);
-  const bottomCss = Math.max(topLeft[1], bottomLeft[1]);
-  const stepX = pixelStepXCss * pixelRatio;
-  const stepY = pixelStepYCss * pixelRatio;
-  const left = leftCss * pixelRatio;
-  const right = rightCss * pixelRatio;
-  const top = topCss * pixelRatio;
-  const bottom = bottomCss * pixelRatio;
-  const gapWidth = gapWidthCss * pixelRatio;
+  }
 
   ctx.save();
-  ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
-  ctx.lineWidth = gapWidth;
+  ctx.strokeStyle = `rgba(255,255,255,${overlay.alpha.toFixed(3)})`;
+  ctx.lineWidth = overlay.gapWidth;
   ctx.beginPath();
-  for (let x = left + stepX; x < right; x += stepX) {
-    ctx.moveTo(x, top);
-    ctx.lineTo(x, bottom);
+  for (let x = overlay.left + overlay.stepX; x < overlay.right; x += overlay.stepX) {
+    ctx.moveTo(x, overlay.top);
+    ctx.lineTo(x, overlay.bottom);
   }
-  for (let y = top + stepY; y < bottom; y += stepY) {
-    ctx.moveTo(left, y);
-    ctx.lineTo(right, y);
+  for (let y = overlay.top + overlay.stepY; y < overlay.bottom; y += overlay.stepY) {
+    ctx.moveTo(overlay.left, y);
+    ctx.lineTo(overlay.right, y);
   }
   ctx.stroke();
   ctx.restore();
@@ -1755,6 +1798,11 @@ function syncMapViewportAfterResize() {
   // делаем отложенную синхронизацию, чтобы слои и пиксельная сетка не смещались.
   viewportSyncTimer = setTimeout(() => {
     viewportSyncTimer = null;
+    nowcastGridOverlayCache = null;
+    if (nowcastResolutionRerenderTimer) {
+      clearTimeout(nowcastResolutionRerenderTimer);
+      nowcastResolutionRerenderTimer = null;
+    }
     map.updateSize();
     inspectPrecipAtCrosshairCenter().catch(() => {});
     if (!frames.length) return;
@@ -2237,6 +2285,7 @@ async function renderFrame(index) {
   const renderToken = ++frameRenderToken;
   currentFrame = ((index % frames.length) + frames.length) % frames.length;
   const frame = frames[currentFrame];
+  nowcastGridOverlayCache = null;
   if (frame?.satelliteTile && frame?.satelliteTileTemplate) {
     const source = getSatelliteTileSource(frame.satelliteTileTemplate);
     if (renderToken !== frameRenderToken) return;
