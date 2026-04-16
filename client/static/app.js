@@ -1019,8 +1019,13 @@ function createMap() {
   map = new ol.Map({
     target: "map",
     layers: [baseLayer, satelliteLayer, frameLayer, satelliteReferenceLayer],
+    interactions: ol.interaction.defaults({
+      altShiftDragRotate: false,
+      pinchRotate: false,
+    }),
     view: new ol.View({
       projection,
+      enableRotation: false,
       center: ol.proj.fromLonLat([
         (geoBounds[0] + geoBounds[2]) / 2,
         (geoBounds[1] + geoBounds[3]) / 2,
