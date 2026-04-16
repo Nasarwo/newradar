@@ -253,6 +253,7 @@ const NOWCAST_PIXEL_GAP_MIN_SCREEN_PX = 3;
 const NOWCAST_PIXEL_GAP_MAX_SCREEN_PX = 1.25;
 let frameRenderToken = 0;
 let centerProbeToken = 0;
+let viewportSyncTimer = null;
 const nowcastBlobUrlCache = new Map();
 const nowcastBlobUrlOrder = [];
 const satelliteBlobUrlCache = new Map();
@@ -1745,6 +1746,24 @@ function setDrawMode(enabled) {
     setStatus("Режим рисования: ведите курсор с зажатой кнопкой мыши.");
 }
 
+function syncMapViewportAfterResize() {
+  if (!map) return;
+  if (viewportSyncTimer) {
+    clearTimeout(viewportSyncTimer);
+  }
+  // На мобильных после поворота размер viewport меняется каскадно:
+  // делаем отложенную синхронизацию, чтобы слои и пиксельная сетка не смещались.
+  viewportSyncTimer = setTimeout(() => {
+    viewportSyncTimer = null;
+    map.updateSize();
+    inspectPrecipAtCrosshairCenter().catch(() => {});
+    if (!frames.length) return;
+    renderFrame(currentFrame).catch((e) => {
+      console.warn("Frame rerender after viewport resize failed:", e);
+    });
+  }, 140);
+}
+
 async function loadNowcastMeta(preferredLayers = "") {
   const response = await fetch("/api/nowcast/meta", { cache: "no-store" });
   if (!response.ok) {
@@ -2399,6 +2418,13 @@ function bindControls() {
     if (!isMobileLayout()) {
       setMobileMenuOpen(false);
     }
+    syncMapViewportAfterResize();
+  });
+  window.addEventListener("orientationchange", () => {
+    syncMapViewportAfterResize();
+  });
+  window.visualViewport?.addEventListener?.("resize", () => {
+    syncMapViewportAfterResize();
   });
   playbackFrameCountEl?.addEventListener("change", () => {
     if (!frames.length) return;
