@@ -8,6 +8,16 @@ const SATELLITE_FRAME_LIMIT = 18;
 const SATELLITE_CADENCE_MIN = 10;
 const SOURCE_HD = "__hd__";
 const SOURCE_SATELLITE = "__satellite__";
+const SATELLITE_MODE_LAYER_REQUEST = {
+  hd_day: "European HRV RGB 0 degree",
+  gray_dn: "msg_fes:ir108",
+  colorized: "msg_fes:ir108",
+};
+const SATELLITE_MODE_IMAGE_WIDTH = {
+  hd_day: 4096,
+  gray_dn: 3072,
+  colorized: 3072,
+};
 const SATELLITE_REFERENCE_TILE_URL =
   "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places_Alternate/MapServer/tile/{z}/{y}/{x}";
 const NOWCAST_LAYER_LABELS = {
@@ -22,7 +32,10 @@ const NOWCAST_LAYER_ORDER = [
   "bufr_dbz1",
   "bufr_precip",
 ];
-const SATELLITE_LAYER_LABEL = "Спутник HD";
+const SATELLITE_LAYER_LABEL = "Спутник";
+const SATELLITE_STYLE_HD_DAY = "hd_day";
+const SATELLITE_STYLE_GRAY_DAY_NIGHT = "gray_dn";
+const SATELLITE_STYLE_COLORIZED = "colorized";
 const SATELLITE_WMTS_LAYER_CANDIDATES = [
   "GOES-East_ABI_Band13_Clean_Infrared",
   "GOES-West_ABI_Band13_Clean_Infrared",
@@ -64,8 +77,8 @@ const mobileSourceLayerSelectEl = document.getElementById(
 const mobileSatelliteStylePanelEl = document.getElementById(
   "mobileSatelliteStylePanel",
 );
-const mobileSatelliteColorToggleEl = document.getElementById(
-  "mobileSatelliteColorToggle",
+const mobileSatelliteColorModeEl = document.getElementById(
+  "mobileSatelliteColorMode",
 );
 const satelliteStylePanelEl = document.getElementById("satelliteStylePanel");
 const satelliteColorModeEl = document.getElementById("satelliteColorMode");
@@ -261,7 +274,7 @@ const satelliteBlobUrlCache = new Map();
 const satelliteBlobUrlOrder = [];
 const satelliteTileStyleCache = new Map();
 const satelliteTileStyleOrder = [];
-let satelliteRadiationColorEnabled = false;
+let satelliteStyleMode = SATELLITE_STYLE_HD_DAY;
 
 function updateSatelliteStylePanelVisibility() {
   satelliteStylePanelEl?.classList.toggle(
@@ -275,22 +288,27 @@ function updateSatelliteStylePanelVisibility() {
 }
 
 function syncSatelliteModeControls() {
-  const mode = satelliteRadiationColorEnabled ? "cloudtop" : "rgb";
+  const mode = satelliteStyleMode || SATELLITE_STYLE_HD_DAY;
   if (satelliteColorModeEl) satelliteColorModeEl.value = mode;
-  if (mobileSatelliteColorToggleEl) {
-    mobileSatelliteColorToggleEl.checked = satelliteRadiationColorEnabled;
-  }
+  if (mobileSatelliteColorModeEl) mobileSatelliteColorModeEl.value = mode;
 }
 
-async function applySatelliteMode(enabled) {
-  const nextEnabled = Boolean(enabled);
-  if (nextEnabled === satelliteRadiationColorEnabled) {
+function normalizeSatelliteStyleMode(mode) {
+  const value = String(mode || "").trim();
+  if (value === SATELLITE_STYLE_GRAY_DAY_NIGHT) return SATELLITE_STYLE_GRAY_DAY_NIGHT;
+  if (value === SATELLITE_STYLE_COLORIZED) return SATELLITE_STYLE_COLORIZED;
+  return SATELLITE_STYLE_HD_DAY;
+}
+
+async function applySatelliteMode(mode) {
+  const prevMode = satelliteStyleMode;
+  const nextMode = normalizeSatelliteStyleMode(mode);
+  if (nextMode === satelliteStyleMode) {
     syncSatelliteModeControls();
     return;
   }
-  satelliteRadiationColorEnabled = nextEnabled;
+  satelliteStyleMode = nextMode;
   syncSatelliteModeControls();
-  clearSatelliteStyleCaches();
   if (activeSource !== SOURCE_SATELLITE) return;
   satelliteLayer?.setSource(null);
   setStatus("Применение спутникового режима...");
@@ -298,13 +316,21 @@ async function applySatelliteMode(enabled) {
     await switchSource(SOURCE_SATELLITE);
   } catch (e) {
     console.warn("Satellite style switch failed:", e);
+    // Возвращаем предыдущий режим и пробуем восстановить поток кадров,
+    // чтобы не оставить сломанные blob-URL после неудачного переключения.
+    satelliteStyleMode = prevMode;
+    syncSatelliteModeControls();
+    try {
+      await switchSource(SOURCE_SATELLITE);
+    } catch (restoreErr) {
+      console.warn("Satellite style restore failed:", restoreErr);
+    }
     setStatus(`Ошибка переключения спутникового режима: ${e.message}`);
   }
 }
 
 function getSatelliteStyleCacheKey(sourceUrl) {
-  const mode = satelliteRadiationColorEnabled ? "cloudtop" : "rgb";
-  return `${mode}|${sourceUrl}`;
+  return `${satelliteStyleMode}|${sourceUrl}`;
 }
 
 function clearSatelliteStyleCaches() {
@@ -583,7 +609,10 @@ function estimateBtBySatelliteColor(r, g, b) {
 }
 
 async function styleSatelliteTileCTA(blob) {
-  if (!satelliteRadiationColorEnabled) {
+  if (
+    satelliteStyleMode === SATELLITE_STYLE_HD_DAY ||
+    satelliteStyleMode === SATELLITE_STYLE_GRAY_DAY_NIGHT
+  ) {
     return blob;
   }
   const canvas = document.createElement("canvas");
@@ -618,15 +647,16 @@ async function styleSatelliteTileCTA(blob) {
     const b = data[i + 2];
     const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     const bt = pseudoBtCByLuma(luma);
-    const [nr, ng, nb] = satelliteRadiationColorEnabled
+    const isColorizedMode = satelliteStyleMode === SATELLITE_STYLE_COLORIZED;
+    const [nr, ng, nb] = isColorizedMode
       ? ctaLikeRgbByBt(bt)
       : meteologixLikeRgbByBt(bt);
-    const coldNorm = Math.pow(clamp01((-32 - bt) / 48), 0.9);
+    const coldNorm = Math.pow(clamp01((-32 - bt) / 48), isColorizedMode ? 0.9 : 0.82);
     data[i] = nr;
     data[i + 1] = ng;
     data[i + 2] = nb;
-    const alphaBase = satelliteRadiationColorEnabled ? 0.72 : 0.75;
-    const alphaBoost = satelliteRadiationColorEnabled ? 0.24 : 0.2;
+    const alphaBase = isColorizedMode ? 0.72 : 0.75;
+    const alphaBoost = isColorizedMode ? 0.24 : 0.2;
     data[i + 3] = Math.max(
       1,
       Math.round(a * (alphaBase + alphaBoost * coldNorm)),
@@ -1204,15 +1234,17 @@ function renderNowcastPixelGapOverlay(event) {
   const topRight = toPixel(east, north);
   const bottomLeft = toPixel(west, south);
 
-  const renderWidthCss = Math.abs(topRight[0] - topLeft[0]);
-  const renderHeightCss = Math.abs(bottomLeft[1] - topLeft[1]);
-  if (!(renderWidthCss > 0 && renderHeightCss > 0)) return;
+  const spanX = [topRight[0] - topLeft[0], topRight[1] - topLeft[1]];
+  const spanY = [bottomLeft[0] - topLeft[0], bottomLeft[1] - topLeft[1]];
+  const spanXLen = Math.hypot(spanX[0], spanX[1]);
+  const spanYLen = Math.hypot(spanY[0], spanY[1]);
+  if (!(spanXLen > 0 && spanYLen > 0)) return;
 
   // Для ImageStatic в OL лучше совпадает модель "центр-центр":
-  // extent задает центры крайних пикселей, поэтому шаг считаем по width-1.
-  const pixelStepXCss = renderWidthCss / Math.max(1, width - 1);
-  const pixelStepYCss = renderHeightCss / Math.max(1, height - 1);
-  const minStepCss = Math.min(pixelStepXCss, pixelStepYCss);
+  // extent задает центры крайних пикселей, поэтому шаг считаем по width-1/height-1.
+  const stepXLen = spanXLen / Math.max(1, width - 1);
+  const stepYLen = spanYLen / Math.max(1, height - 1);
+  const minStepCss = Math.min(stepXLen, stepYLen);
   if (
     !Number.isFinite(minStepCss) ||
     minStepCss < NOWCAST_PIXEL_GAP_MIN_SCREEN_PX
@@ -1226,36 +1258,40 @@ function renderNowcastPixelGapOverlay(event) {
     Math.min(NOWCAST_PIXEL_GAP_MAX_SCREEN_PX, minStepCss * 0.16),
   );
   const alpha = Math.max(0.08, Math.min(0.24, 0.06 + minStepCss * 0.02));
-  const leftCss = Math.min(topLeft[0], topRight[0]);
-  const rightCss = Math.max(topLeft[0], topRight[0]);
-  const topCss = Math.min(topLeft[1], bottomLeft[1]);
-  const bottomCss = Math.max(topLeft[1], bottomLeft[1]);
-
-  const stepX = pixelStepXCss * pixelRatio;
-  const stepY = pixelStepYCss * pixelRatio;
-  const left = leftCss * pixelRatio;
-  const right = rightCss * pixelRatio;
-  const top = topCss * pixelRatio;
-  const bottom = bottomCss * pixelRatio;
+  const stepX = [
+    (spanX[0] / Math.max(1, width - 1)) * pixelRatio,
+    (spanX[1] / Math.max(1, width - 1)) * pixelRatio,
+  ];
+  const stepY = [
+    (spanY[0] / Math.max(1, height - 1)) * pixelRatio,
+    (spanY[1] / Math.max(1, height - 1)) * pixelRatio,
+  ];
+  const tl = [topLeft[0] * pixelRatio, topLeft[1] * pixelRatio];
+  const tr = [topRight[0] * pixelRatio, topRight[1] * pixelRatio];
+  const bl = [bottomLeft[0] * pixelRatio, bottomLeft[1] * pixelRatio];
   const gapWidth = gapWidthCss * pixelRatio;
-  const boundaryStartX = left - stepX * 0.5;
-  const boundaryStartY = top - stepY * 0.5;
 
   ctx.save();
   ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
   ctx.lineWidth = gapWidth;
   ctx.beginPath();
   for (let i = 1; i < width; i++) {
-    const x = boundaryStartX + i * stepX;
-    if (x <= left || x >= right) continue;
-    ctx.moveTo(x, top);
-    ctx.lineTo(x, bottom);
+    const k = i - 0.5;
+    const sx = tl[0] + stepX[0] * k;
+    const sy = tl[1] + stepX[1] * k;
+    const ex = bl[0] + stepX[0] * k;
+    const ey = bl[1] + stepX[1] * k;
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex, ey);
   }
   for (let i = 1; i < height; i++) {
-    const y = boundaryStartY + i * stepY;
-    if (y <= top || y >= bottom) continue;
-    ctx.moveTo(left, y);
-    ctx.lineTo(right, y);
+    const k = i - 0.5;
+    const sx = tl[0] + stepY[0] * k;
+    const sy = tl[1] + stepY[1] * k;
+    const ex = tr[0] + stepY[0] * k;
+    const ey = tr[1] + stepY[1] * k;
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex, ey);
   }
   ctx.stroke();
   ctx.restore();
@@ -1964,25 +2000,32 @@ async function loadNowcastFrames(layerName) {
 }
 
 async function loadSatelliteFrames() {
-  const cacheMode = "rgb";
-  const framesCacheKey = `auto|${SATELLITE_FRAME_LIMIT}|${SATELLITE_CADENCE_MIN}|${cacheMode}`;
+  const cacheMode = satelliteStyleMode;
+  const requestedLayer =
+    SATELLITE_MODE_LAYER_REQUEST[cacheMode] ||
+    SATELLITE_MODE_LAYER_REQUEST[SATELLITE_STYLE_HD_DAY];
+  const widthHint =
+    SATELLITE_MODE_IMAGE_WIDTH[cacheMode] ||
+    SATELLITE_MODE_IMAGE_WIDTH[SATELLITE_STYLE_GRAY_DAY_NIGHT];
+  const [west, south, east, north] = geoBounds;
+  const heightHint = Math.max(
+    512,
+    Math.round((widthHint * Math.abs(north - south)) / Math.max(0.001, Math.abs(east - west))),
+  );
+  const framesCacheKey = `${requestedLayer}|${SATELLITE_FRAME_LIMIT}|${SATELLITE_CADENCE_MIN}|${cacheMode}|${widthHint}x${heightHint}`;
   if (satelliteFramesByKey.has(framesCacheKey)) {
     return satelliteFramesByKey.get(framesCacheKey);
   }
-  const [west, south, east, north] = geoBounds;
-  const [width0, height0] = radarImageSize;
-  const width = Number.isFinite(width0) && width0 > 0 ? width0 : 1200;
-  const height = Number.isFinite(height0) && height0 > 0 ? height0 : 1200;
   const params = new URLSearchParams({
-    layer: "auto",
+    layer: requestedLayer,
     limit: String(SATELLITE_FRAME_LIMIT),
     cadenceMin: String(SATELLITE_CADENCE_MIN),
     west: String(west),
     south: String(south),
     east: String(east),
     north: String(north),
-    width: String(width),
-    height: String(height),
+    width: String(widthHint),
+    height: String(heightHint),
   });
   setStatus("Загрузка спутниковых кадров...");
   const response = await fetch(`/api/satellite/frames?${params.toString()}`, {
@@ -2001,8 +2044,8 @@ async function loadSatelliteFrames() {
       timestamp: new Date(f.time || f.timestamp || Date.now()),
       projection: f.projection || "EPSG:4326",
       imageExtent: Array.isArray(f.imageExtent) ? f.imageExtent : geoBounds,
-      imageWidth: width,
-      imageHeight: height,
+      imageWidth: Number(f.imageWidth || 0),
+      imageHeight: Number(f.imageHeight || 0),
     }))
     .filter(
       (f) =>
@@ -2553,11 +2596,14 @@ function bindControls() {
     }
   });
   satelliteColorModeEl?.addEventListener("change", async () => {
-    const nextMode = String(satelliteColorModeEl.value || "rgb");
-    await applySatelliteMode(nextMode === "cloudtop");
+    const nextMode = String(satelliteColorModeEl.value || SATELLITE_STYLE_HD_DAY);
+    await applySatelliteMode(nextMode);
   });
-  mobileSatelliteColorToggleEl?.addEventListener("change", async () => {
-    await applySatelliteMode(Boolean(mobileSatelliteColorToggleEl.checked));
+  mobileSatelliteColorModeEl?.addEventListener("change", async () => {
+    const nextMode = String(
+      mobileSatelliteColorModeEl.value || SATELLITE_STYLE_HD_DAY,
+    );
+    await applySatelliteMode(nextMode);
   });
 }
 

@@ -23,6 +23,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -145,6 +146,8 @@ var (
 	gld360CacheKey     string
 	gld360CacheUntil   time.Time
 	gld360CacheStrikes []lightningStrike
+	gld360WarnMu       sync.Mutex
+	gld360WarnUntil    = map[string]time.Time{}
 	nowcastTokenMu     sync.Mutex
 	nowcastAccessToken string
 	nowcastTokenExpiry time.Time
@@ -657,11 +660,18 @@ func fetchGLD360LatestCached(
 	south float64,
 	north float64,
 ) ([]lightningStrike, error) {
+	window := end.Sub(start)
+	if window <= 0 {
+		window = 20 * time.Minute
+	}
+	// Квантование времени снимает "дребезг" ключа кэша и убирает шторм запросов.
+	roundedEnd := end.UTC().Truncate(20 * time.Second)
+	roundedStart := roundedEnd.Add(-window)
 	cacheKey := fmt.Sprintf(
 		"stations=%s|from=%s|to=%s|bbox=%t:%.4f,%.4f,%.4f,%.4f",
 		strings.Join(stations, ","),
-		start.UTC().Format(time.RFC3339),
-		end.UTC().Format(time.RFC3339),
+		roundedStart.Format(time.RFC3339),
+		roundedEnd.Format(time.RFC3339),
 		useBBox,
 		west, east, south, north,
 	)
@@ -701,7 +711,7 @@ func fetchGLD360Latest(
 	for _, station := range stations {
 		part, err := fetchGLD360Station(ctx, station, start, end, useBBox, west, east, south, north)
 		if err != nil {
-			log.Printf("[lightning/gld360] station=%s warning: %v", station, err)
+			logGLD360WarningThrottled(station, err)
 			continue
 		}
 		for _, s := range part {
@@ -719,6 +729,31 @@ func fetchGLD360Latest(
 	return all, nil
 }
 
+func logGLD360WarningThrottled(station string, err error) {
+	msg := strings.TrimSpace(fmt.Sprintf("%v", err))
+	if msg == "" {
+		return
+	}
+	key := strings.ToUpper(strings.TrimSpace(station)) + "|" + msg
+	now := time.Now()
+	gld360WarnMu.Lock()
+	until := gld360WarnUntil[key]
+	if now.Before(until) {
+		gld360WarnMu.Unlock()
+		return
+	}
+	gld360WarnUntil[key] = now.Add(45 * time.Second)
+	if len(gld360WarnUntil) > 128 {
+		for k, exp := range gld360WarnUntil {
+			if now.After(exp) {
+				delete(gld360WarnUntil, k)
+			}
+		}
+	}
+	gld360WarnMu.Unlock()
+	log.Printf("[lightning/gld360] station=%s warning: %s", station, msg)
+}
+
 func fetchGLD360Station(
 	ctx context.Context,
 	station string,
@@ -734,30 +769,66 @@ func fetchGLD360Station(
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, lightningGLD360URL, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
+	endpoints := []string{
+		lightningGLD360URL,
+		"https://www.boxtools.space/all/GLD360.php",
 	}
-	req.Header.Set("User-Agent", nowcastUserAgent)
-	req.Header.Set("Accept", "application/json,*/*")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "https://boxtools.space")
-	req.Header.Set("Referer", "https://boxtools.space/all/GLD360.php")
-	resp, err := lightningHTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("station %s: HTTP %d", station, resp.StatusCode)
-	}
+	lastErr := error(nil)
 	var fc gld360FeatureCollection
-	if err := json.Unmarshal(body, &fc); err != nil {
-		return nil, fmt.Errorf("station %s: %w", station, err)
+	for _, endpoint := range endpoints {
+		if strings.TrimSpace(endpoint) == "" {
+			continue
+		}
+		req, reqErr := http.NewRequestWithContext(
+			ctx,
+			http.MethodPost,
+			endpoint,
+			bytes.NewReader(payload),
+		)
+		if reqErr != nil {
+			lastErr = reqErr
+			continue
+		}
+		req.Header.Set("User-Agent", nowcastUserAgent)
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://boxtools.space")
+		req.Header.Set("Referer", "https://boxtools.space/all/GLD360.php")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		resp, doErr := lightningHTTP.Do(req)
+		if doErr != nil {
+			lastErr = doErr
+			if errors.Is(doErr, context.Canceled) || errors.Is(doErr, context.DeadlineExceeded) {
+				return nil, doErr
+			}
+			var dnsErr *net.DNSError
+			if errors.As(doErr, &dnsErr) {
+				continue
+			}
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("station %s: endpoint=%s HTTP %d", station, endpoint, resp.StatusCode)
+			continue
+		}
+		if err := json.Unmarshal(body, &fc); err != nil {
+			lastErr = fmt.Errorf("station %s: endpoint=%s decode: %w", station, endpoint, err)
+			continue
+		}
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		return nil, lastErr
 	}
 	out := make([]lightningStrike, 0, len(fc.Features))
 	for _, f := range fc.Features {
@@ -1525,6 +1596,7 @@ func syncSatelliteFrames(ctx context.Context) error {
 	if len(layers) == 0 {
 		return errors.New("no satellite layers selected for prefetch")
 	}
+	satelliteFrameLimit := parseIntEnv("SATELLITE_SYNC_FRAME_LIMIT", syncFrameLimit, 1, 72)
 
 	state.mu.RLock()
 	defaultBounds := state.geoBounds
@@ -1536,7 +1608,7 @@ func syncSatelliteFrames(ctx context.Context) error {
 	width, height := defaultSatelliteImageSize(west, south, east, north)
 	bounds := [4]float64{west, south, east, north}
 
-	keep := make(map[string]struct{}, syncFrameLimit*len(layers))
+	keep := make(map[string]struct{}, satelliteFrameLimit*len(layers))
 	fetched := 0
 	layerCount := 0
 	sourceID := "token"
@@ -1548,7 +1620,7 @@ func syncSatelliteFrames(ctx context.Context) error {
 		if len(times) == 0 {
 			continue
 		}
-		picked, err := pickSatelliteTimes(times, syncFrameLimit, time.Duration(frameIntervalMin)*time.Minute)
+		picked, err := pickSatelliteTimes(times, satelliteFrameLimit, time.Duration(frameIntervalMin)*time.Minute)
 		if err != nil || len(picked) == 0 {
 			continue
 		}
@@ -1684,30 +1756,35 @@ func listSatellitePrefetchLayers(
 			add(token)
 		}
 	}
-	preferred := []string{
-		strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER")),
-		eumetDefaultLayer,
-		"msg_fes:rgb_eview",
-		"msg_iodc:rgb_eview",
-		"mumi:worldcloudmap_ir108",
-		"msg_fes:ir108",
-		"msg_iodc:ir108",
-		"msg_fes:ir108_hrv",
-		"Meteosat:msg_ir108",
-	}
-	for _, layer := range preferred {
-		add(layer)
-	}
-	for name, times := range layerTimes {
-		if len(times) == 0 {
-			continue
+	// По умолчанию префетчим только реально используемый слой (+ явные override из env),
+	// иначе startup может легко превысить timeout на десятках тяжелых спутниковых запросов.
+	if parseBoolEnv("EUMETVIEW_PREFETCH_BROAD", false) {
+		preferred := []string{
+			strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER")),
+			"European HRV RGB 0 degree",
+			eumetDefaultLayer,
+			"msg_fes:rgb_eview",
+			"msg_iodc:rgb_eview",
+			"mumi:worldcloudmap_ir108",
+			"msg_fes:ir108",
+			"msg_iodc:ir108",
+			"msg_fes:ir108_hrv",
+			"Meteosat:msg_ir108",
 		}
-		title := strings.ToLower(strings.TrimSpace(layerTitles[name]))
-		lowName := strings.ToLower(strings.TrimSpace(name))
-		if strings.Contains(lowName, "ir108") || strings.Contains(lowName, "ir 10.8") ||
-			strings.Contains(lowName, "brightness") || strings.Contains(title, "infrared") ||
-			strings.Contains(title, "brightness temperature") {
-			add(name)
+		for _, layer := range preferred {
+			add(layer)
+		}
+		for name, times := range layerTimes {
+			if len(times) == 0 {
+				continue
+			}
+			title := strings.ToLower(strings.TrimSpace(layerTitles[name]))
+			lowName := strings.ToLower(strings.TrimSpace(name))
+			if strings.Contains(lowName, "ir108") || strings.Contains(lowName, "ir 10.8") ||
+				strings.Contains(lowName, "brightness") || strings.Contains(title, "infrared") ||
+				strings.Contains(title, "brightness temperature") {
+				add(name)
+			}
 		}
 	}
 	out := make([]string, 0, len(seen))
@@ -1840,6 +1917,9 @@ func fetchSatelliteImageWithFallback(
 	allowCacheWrite bool,
 ) (string, []byte, string, int, error) {
 	var lastErr error
+	var lastStatus int
+	var lastBody []byte
+	var lastContentType string
 	for _, base := range preferredEUMETWMSBases() {
 		body, contentType, status, err := fetchSatelliteImageAndMaybeCache(
 			ctx,
@@ -1855,10 +1935,13 @@ func fetchSatelliteImageWithFallback(
 		if err == nil {
 			return base, body, contentType, status, nil
 		}
+		lastStatus = status
+		lastBody = body
+		lastContentType = contentType
 		lastErr = err
 	}
 	if lastErr != nil {
-		return "", nil, "", 0, lastErr
+		return "", lastBody, lastContentType, lastStatus, lastErr
 	}
 	return "", nil, "", 0, errors.New("no eumet wms endpoints configured")
 }
@@ -1898,8 +1981,13 @@ func fetchSatelliteImageAndMaybeCache(
 	cacheKey := sourceID + "|" + strings.TrimSpace(wmsBase) + "|" + canonicalNowcastQuery(values)
 	cacheMaxAge := satelliteImageCacheMaxAge(timeStr)
 	if body, contentType, ok := readSatelliteCache("img:"+cacheKey, cacheMaxAge); ok {
-		log.Printf("[satellite/cache] HIT image: layer=%q time=%s source=%s bytes=%d", layer, timeStr, sourceID, len(body))
-		return body, contentType, http.StatusOK, nil
+		if !isSatelliteImagePayload(contentType, body) {
+			log.Printf("[satellite/cache] DROP invalid image cache: layer=%q time=%s source=%s content-type=%q bytes=%d", layer, timeStr, sourceID, contentType, len(body))
+			removeCacheEntryByBase(satelliteCacheFileBase("img:" + cacheKey))
+		} else {
+			log.Printf("[satellite/cache] HIT image: layer=%q time=%s source=%s bytes=%d", layer, timeStr, sourceID, len(body))
+			return body, contentType, http.StatusOK, nil
+		}
 	}
 	log.Printf("[satellite/cache] MISS image: layer=%q time=%s source=%s -> fetch upstream", layer, timeStr, sourceID)
 	upstreamValues := cloneValues(values)
@@ -1928,20 +2016,63 @@ func fetchSatelliteImageAndMaybeCache(
 	if contentType == "" {
 		contentType = http.DetectContentType(body)
 	}
-	if allowCacheWrite && resp.StatusCode == http.StatusOK {
+	log.Printf("[satellite/upstream] image: layer=%q time=%s status=%d bytes=%d content-type=%q", layer, timeStr, resp.StatusCode, len(body), contentType)
+
+	if resp.StatusCode != http.StatusOK {
+		return body, contentType, resp.StatusCode, fmt.Errorf("satellite upstream status=%d body=%q", resp.StatusCode, compactPayloadSnippet(body, 240))
+	}
+	if !isSatelliteImagePayload(contentType, body) {
+		return body, contentType, resp.StatusCode, fmt.Errorf(
+			"satellite upstream non-image payload content-type=%q body=%q",
+			contentType,
+			compactPayloadSnippet(body, 240),
+		)
+	}
+	if allowCacheWrite {
 		writeSatelliteCache("img:"+cacheKey, contentType, body)
 	}
-	log.Printf("[satellite/upstream] image: layer=%q time=%s status=%d bytes=%d content-type=%q", layer, timeStr, resp.StatusCode, len(body), contentType)
 	return body, contentType, resp.StatusCode, nil
+}
+
+func compactPayloadSnippet(body []byte, maxLen int) string {
+	if len(body) == 0 {
+		return ""
+	}
+	s := strings.TrimSpace(string(body))
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if maxLen <= 0 || len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+func isSatelliteImagePayload(contentType string, body []byte) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	if strings.HasPrefix(ct, "image/") {
+		return true
+	}
+	sniff := strings.ToLower(strings.TrimSpace(string(body)))
+	if strings.HasPrefix(sniff, "<?xml") {
+		return false
+	}
+	if strings.HasPrefix(sniff, "<serviceexceptionreport") {
+		return false
+	}
+	if strings.HasPrefix(sniff, "<ows:exceptionreport") {
+		return false
+	}
+	return strings.HasPrefix(ct, "application/octet-stream") && len(body) > 0
 }
 
 func defaultSatelliteImageSize(west, south, east, north float64) (int, int) {
 	lonSpan := math.Abs(east - west)
 	latSpan := math.Abs(north - south)
 	if !NumberIsFinite(lonSpan) || !NumberIsFinite(latSpan) || lonSpan <= 0 || latSpan <= 0 {
-		return 6144, 3072
+		return 3072, 1536
 	}
-	w := 6144
+	w := 3072
 	h := int(math.Round(float64(w) * (latSpan / lonSpan)))
 	if h < 512 {
 		h = 512
@@ -2063,22 +2194,65 @@ func resolveEUMETLayer(
 	layerTimes map[string][]string,
 	layerTitles map[string]string,
 ) (string, string, error) {
+	norm := func(s string) string {
+		s = strings.ToLower(strings.TrimSpace(s))
+		s = strings.ReplaceAll(s, "_", " ")
+		s = strings.ReplaceAll(s, ":", " ")
+		s = strings.Join(strings.Fields(s), " ")
+		return s
+	}
+	resolveByAlias := func(raw string) string {
+		key := norm(raw)
+		aliases := map[string][]string{
+			"european hrv rgb 0 degree": {"msg_fes:rgb_eview", "msg_iodc:rgb_eview"},
+			"european hrv rgb":          {"msg_fes:rgb_eview", "msg_iodc:rgb_eview"},
+			"hrv rgb 0 degree":          {"msg_fes:rgb_eview", "msg_iodc:rgb_eview"},
+			"hrv rgb":                   {"msg_fes:rgb_eview", "msg_iodc:rgb_eview"},
+			"msg fes ir108 hrv":         {"msg_fes:ir108", "msg_iodc:ir108"},
+			"msg_fes ir108 hrv":         {"msg_fes:ir108", "msg_iodc:ir108"},
+			"msg_fes:ir108_hrv":         {"msg_fes:ir108", "msg_iodc:ir108"},
+		}
+		candidates := aliases[key]
+		for _, candidate := range candidates {
+			if len(intersectLayerTimes(candidate, layerTimes)) > 0 {
+				return candidate
+			}
+		}
+		return ""
+	}
 	req := strings.TrimSpace(requested)
 	if req != "" && !strings.EqualFold(req, "auto") {
-		if len(intersectLayerTimes(req, layerTimes)) == 0 {
-			return "", "", fmt.Errorf("layer %q has no available times", req)
+		if len(intersectLayerTimes(req, layerTimes)) > 0 {
+			return req, strings.TrimSpace(layerTitles[req]), nil
 		}
-		return req, strings.TrimSpace(layerTitles[req]), nil
+		if resolved := resolveByAlias(req); resolved != "" {
+			return resolved, strings.TrimSpace(layerTitles[resolved]), nil
+		}
+		reqNorm := norm(req)
+		for name, times := range layerTimes {
+			if len(times) == 0 {
+				continue
+			}
+			title := strings.TrimSpace(layerTitles[name])
+			nameNorm := norm(name)
+			titleNorm := norm(title)
+			if reqNorm == nameNorm || reqNorm == titleNorm ||
+				strings.Contains(nameNorm, reqNorm) || strings.Contains(titleNorm, reqNorm) {
+				return name, title, nil
+			}
+		}
+		return "", "", fmt.Errorf("layer %q has no available times (exact/fuzzy match failed)", req)
 	}
 	candidates := []string{
 		strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER")),
+		"European HRV RGB 0 degree",
 		eumetDefaultLayer,
 		"msg_fes:rgb_eview",
 		"msg_iodc:rgb_eview",
-		"mumi:worldcloudmap_ir108",
+		"msg_fes:ir108_hrv",
 		"msg_fes:ir108",
 		"msg_iodc:ir108",
-		"msg_fes:ir108_hrv",
+		"mumi:worldcloudmap_ir108",
 		"Meteosat:msg_ir108",
 	}
 	if extra := strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER_CANDIDATES")); extra != "" {
@@ -2118,13 +2292,13 @@ func resolveEUMETLayer(
 			score += 4
 		}
 		if strings.Contains(sn, "rgb_eview") || strings.Contains(sn, "european hrv rgb") {
-			score += 12
+			score += 14
 		}
 		if strings.Contains(sn, "hrv") || strings.Contains(sn, "rgb") {
-			score += 3
+			score += 8
 		}
 		if strings.Contains(sn, "ir108") || strings.Contains(sn, "ir 10.8") || strings.Contains(sn, "10.8") {
-			score += 8
+			score += 3
 		}
 		if strings.Contains(sn, "brightness") || strings.Contains(sn, "temperature") {
 			score += 2
