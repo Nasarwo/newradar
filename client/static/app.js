@@ -1019,10 +1019,6 @@ function createMap() {
   map = new ol.Map({
     target: "map",
     layers: [baseLayer, satelliteLayer, frameLayer, satelliteReferenceLayer],
-    interactions: ol.interaction.defaults({
-      altShiftDragRotate: false,
-      pinchRotate: false,
-    }),
     view: new ol.View({
       projection,
       enableRotation: false,
@@ -1032,6 +1028,15 @@ function createMap() {
       ]),
       zoom: 4,
     }),
+  });
+  // В глобальной сборке OL отключаем вращение через интеракции после создания map.
+  map.getInteractions().forEach((interaction) => {
+    if (
+      interaction instanceof ol.interaction.PinchRotate ||
+      interaction instanceof ol.interaction.DragRotate
+    ) {
+      interaction.setActive(false);
+    }
   });
   frameLayer.on("postrender", renderNowcastPixelGapOverlay);
 
