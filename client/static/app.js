@@ -1221,6 +1221,7 @@ function renderNowcastPixelGapOverlay(event) {
   const width = Number(frame.imageWidth || radarImageSize?.[0] || 0);
   const height = Number(frame.imageHeight || radarImageSize?.[1] || 0);
   if (!(width > 1 && height > 1)) return;
+  const frameProjection = String(frame?.projection || "EPSG:4326").toUpperCase();
   const ctx = event?.context;
   if (!ctx) return;
 
@@ -1231,7 +1232,20 @@ function renderNowcastPixelGapOverlay(event) {
   // после остановки взаимодействия (через отложенный renderFrame).
   if (isViewAnimating) return;
 
-  const [west, south, east, north] = frame.imageExtent;
+  let renderExtent = frame.imageExtent;
+  if (frameProjection !== "EPSG:3857") {
+    try {
+      renderExtent = ol.proj.transformExtent(
+        frame.imageExtent,
+        frameProjection,
+        "EPSG:3857",
+      );
+    } catch {
+      renderExtent = frame.imageExtent;
+    }
+  }
+  if (!Array.isArray(renderExtent) || renderExtent.length !== 4) return;
+  const [west, south, east, north] = renderExtent;
   const transform = frameState?.coordinateToPixelTransform;
   if (!Array.isArray(transform) || transform.length < 6) return;
   const toPixel = (x, y) => [
