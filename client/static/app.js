@@ -295,7 +295,8 @@ function syncSatelliteModeControls() {
 
 function normalizeSatelliteStyleMode(mode) {
   const value = String(mode || "").trim();
-  if (value === SATELLITE_STYLE_GRAY_DAY_NIGHT) return SATELLITE_STYLE_GRAY_DAY_NIGHT;
+  if (value === SATELLITE_STYLE_GRAY_DAY_NIGHT)
+    return SATELLITE_STYLE_GRAY_DAY_NIGHT;
   if (value === SATELLITE_STYLE_COLORIZED) return SATELLITE_STYLE_COLORIZED;
   return SATELLITE_STYLE_HD_DAY;
 }
@@ -651,7 +652,10 @@ async function styleSatelliteTileCTA(blob) {
     const [nr, ng, nb] = isColorizedMode
       ? ctaLikeRgbByBt(bt)
       : meteologixLikeRgbByBt(bt);
-    const coldNorm = Math.pow(clamp01((-32 - bt) / 48), isColorizedMode ? 0.9 : 0.82);
+    const coldNorm = Math.pow(
+      clamp01((-32 - bt) / 48),
+      isColorizedMode ? 0.9 : 0.82,
+    );
     data[i] = nr;
     data[i + 1] = ng;
     data[i + 2] = nb;
@@ -1078,7 +1082,9 @@ function createMap() {
     }
     if (drawMode && drawCurrentStroke) {
       drawCurrentStroke.push(event.coordinate.slice());
-      drawCurrentStrokeFeature?.getGeometry?.().setCoordinates(drawCurrentStroke);
+      drawCurrentStrokeFeature
+        ?.getGeometry?.()
+        .setCoordinates(drawCurrentStroke);
     }
   };
   map.on("pointermove", handlePointerTrack);
@@ -1147,7 +1153,9 @@ function createMap() {
         const coord = map.getCoordinateFromPixel(pixel);
         if (!coord) return;
         drawCurrentStroke.push(coord.slice());
-        drawCurrentStrokeFeature?.getGeometry?.().setCoordinates(drawCurrentStroke);
+        drawCurrentStrokeFeature
+          ?.getGeometry?.()
+          .setCoordinates(drawCurrentStroke);
       },
       { passive: false },
     );
@@ -1240,10 +1248,10 @@ function renderNowcastPixelGapOverlay(event) {
   const spanYLen = Math.hypot(spanY[0], spanY[1]);
   if (!(spanXLen > 0 && spanYLen > 0)) return;
 
-  // Для ImageStatic в OL лучше совпадает модель "центр-центр":
-  // extent задает центры крайних пикселей, поэтому шаг считаем по width-1/height-1.
-  const stepXLen = spanXLen / Math.max(1, width - 1);
-  const stepYLen = spanYLen / Math.max(1, height - 1);
+  // ImageStatic работает в модели "край-край":
+  // extent задает границы изображения, поэтому шаг по сетке = span/width(height).
+  const stepXLen = spanXLen / Math.max(1, width);
+  const stepYLen = spanYLen / Math.max(1, height);
   const minStepCss = Math.min(stepXLen, stepYLen);
   if (
     !Number.isFinite(minStepCss) ||
@@ -1259,12 +1267,12 @@ function renderNowcastPixelGapOverlay(event) {
   );
   const alpha = Math.max(0.08, Math.min(0.24, 0.06 + minStepCss * 0.02));
   const stepX = [
-    (spanX[0] / Math.max(1, width - 1)) * pixelRatio,
-    (spanX[1] / Math.max(1, width - 1)) * pixelRatio,
+    (spanX[0] / Math.max(1, width)) * pixelRatio,
+    (spanX[1] / Math.max(1, width)) * pixelRatio,
   ];
   const stepY = [
-    (spanY[0] / Math.max(1, height - 1)) * pixelRatio,
-    (spanY[1] / Math.max(1, height - 1)) * pixelRatio,
+    (spanY[0] / Math.max(1, height)) * pixelRatio,
+    (spanY[1] / Math.max(1, height)) * pixelRatio,
   ];
   const tl = [topLeft[0] * pixelRatio, topLeft[1] * pixelRatio];
   const tr = [topRight[0] * pixelRatio, topRight[1] * pixelRatio];
@@ -1276,7 +1284,7 @@ function renderNowcastPixelGapOverlay(event) {
   ctx.lineWidth = gapWidth;
   ctx.beginPath();
   for (let i = 1; i < width; i++) {
-    const k = i - 0.5;
+    const k = i;
     const sx = tl[0] + stepX[0] * k;
     const sy = tl[1] + stepX[1] * k;
     const ex = bl[0] + stepX[0] * k;
@@ -1285,7 +1293,7 @@ function renderNowcastPixelGapOverlay(event) {
     ctx.lineTo(ex, ey);
   }
   for (let i = 1; i < height; i++) {
-    const k = i - 0.5;
+    const k = i;
     const sx = tl[0] + stepY[0] * k;
     const sy = tl[1] + stepY[1] * k;
     const ex = tr[0] + stepY[0] * k;
@@ -2010,7 +2018,10 @@ async function loadSatelliteFrames() {
   const [west, south, east, north] = geoBounds;
   const heightHint = Math.max(
     512,
-    Math.round((widthHint * Math.abs(north - south)) / Math.max(0.001, Math.abs(east - west))),
+    Math.round(
+      (widthHint * Math.abs(north - south)) /
+        Math.max(0.001, Math.abs(east - west)),
+    ),
   );
   const framesCacheKey = `${requestedLayer}|${SATELLITE_FRAME_LIMIT}|${SATELLITE_CADENCE_MIN}|${cacheMode}|${widthHint}x${heightHint}`;
   if (satelliteFramesByKey.has(framesCacheKey)) {
@@ -2596,7 +2607,9 @@ function bindControls() {
     }
   });
   satelliteColorModeEl?.addEventListener("change", async () => {
-    const nextMode = String(satelliteColorModeEl.value || SATELLITE_STYLE_HD_DAY);
+    const nextMode = String(
+      satelliteColorModeEl.value || SATELLITE_STYLE_HD_DAY,
+    );
     await applySatelliteMode(nextMode);
   });
   mobileSatelliteColorModeEl?.addEventListener("change", async () => {
