@@ -1022,6 +1022,10 @@ function createMap() {
     view: new ol.View({
       projection,
       enableRotation: false,
+      // Дискретные уровни масштаба: убираем дробный zoom, который
+      // визуально "смешивает" пиксельные блоки даже при nearest-render.
+      constrainResolution: true,
+      smoothResolutionConstraint: false,
       center: ol.proj.fromLonLat([
         (geoBounds[0] + geoBounds[2]) / 2,
         (geoBounds[1] + geoBounds[3]) / 2,
@@ -1236,22 +1240,20 @@ function renderNowcastPixelGapOverlay(event) {
   if (!ctx) return;
 
   const frameState = event?.frameState;
-  const viewHints = frameState?.viewHints || [];
-  const isViewAnimating = Boolean(viewHints[0] || viewHints[1]);
-  // Во время pinch/zoom не рисуем сетку вообще: обновляем ее только
-  // после остановки взаимодействия (через отложенный renderFrame).
-  if (isViewAnimating) return;
 
-  let renderExtent = frame.imageExtent;
+  const sourceExtent = frame.imageExtent;
+  if (!Array.isArray(sourceExtent) || sourceExtent.length !== 4) return;
+  const [sourceWest, sourceSouth, sourceEast, sourceNorth] = sourceExtent;
+  let renderExtent = sourceExtent;
   if (frameProjection !== "EPSG:3857") {
     try {
       renderExtent = ol.proj.transformExtent(
-        frame.imageExtent,
+        sourceExtent,
         frameProjection,
         "EPSG:3857",
       );
     } catch {
-      renderExtent = frame.imageExtent;
+      return;
     }
   }
   if (!Array.isArray(renderExtent) || renderExtent.length !== 4) return;
@@ -1290,40 +1292,64 @@ function renderNowcastPixelGapOverlay(event) {
     Math.min(NOWCAST_PIXEL_GAP_MAX_SCREEN_PX, minStepCss * 0.16),
   );
   const alpha = Math.max(0.08, Math.min(0.24, 0.06 + minStepCss * 0.02));
-  const stepX = [
-    (spanX[0] / Math.max(1, width)) * pixelRatio,
-    (spanX[1] / Math.max(1, width)) * pixelRatio,
-  ];
-  const stepY = [
-    (spanY[0] / Math.max(1, height)) * pixelRatio,
-    (spanY[1] / Math.max(1, height)) * pixelRatio,
-  ];
-  const tl = [topLeft[0] * pixelRatio, topLeft[1] * pixelRatio];
-  const tr = [topRight[0] * pixelRatio, topRight[1] * pixelRatio];
-  const bl = [bottomLeft[0] * pixelRatio, bottomLeft[1] * pixelRatio];
   const gapWidth = gapWidthCss * pixelRatio;
 
   ctx.save();
   ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
   ctx.lineWidth = gapWidth;
   ctx.beginPath();
-  for (let i = 1; i < width; i++) {
-    const k = i;
-    const sx = tl[0] + stepX[0] * k;
-    const sy = tl[1] + stepX[1] * k;
-    const ex = bl[0] + stepX[0] * k;
-    const ey = bl[1] + stepX[1] * k;
-    ctx.moveTo(sx, sy);
-    ctx.lineTo(ex, ey);
-  }
-  for (let i = 1; i < height; i++) {
-    const k = i;
-    const sx = tl[0] + stepY[0] * k;
-    const sy = tl[1] + stepY[1] * k;
-    const ex = tr[0] + stepY[0] * k;
-    const ey = tr[1] + stepY[1] * k;
-    ctx.moveTo(sx, sy);
-    ctx.lineTo(ex, ey);
+  if (frameProjection !== "EPSG:3857") {
+    const toMap3857 = (x, y) => ol.proj.transform([x, y], frameProjection, "EPSG:3857");
+    const lonSpan = sourceEast - sourceWest;
+    const latSpan = sourceNorth - sourceSouth;
+    for (let i = 1; i < width; i++) {
+      const lon = sourceWest + (lonSpan * i) / Math.max(1, width);
+      const top = toMap3857(lon, sourceNorth);
+      const bottom = toMap3857(lon, sourceSouth);
+      const s = toPixel(top[0], top[1]);
+      const e = toPixel(bottom[0], bottom[1]);
+      ctx.moveTo(s[0] * pixelRatio, s[1] * pixelRatio);
+      ctx.lineTo(e[0] * pixelRatio, e[1] * pixelRatio);
+    }
+    for (let i = 1; i < height; i++) {
+      const lat = sourceNorth - (latSpan * i) / Math.max(1, height);
+      const left = toMap3857(sourceWest, lat);
+      const right = toMap3857(sourceEast, lat);
+      const s = toPixel(left[0], left[1]);
+      const e = toPixel(right[0], right[1]);
+      ctx.moveTo(s[0] * pixelRatio, s[1] * pixelRatio);
+      ctx.lineTo(e[0] * pixelRatio, e[1] * pixelRatio);
+    }
+  } else {
+    const stepX = [
+      (spanX[0] / Math.max(1, width)) * pixelRatio,
+      (spanX[1] / Math.max(1, width)) * pixelRatio,
+    ];
+    const stepY = [
+      (spanY[0] / Math.max(1, height)) * pixelRatio,
+      (spanY[1] / Math.max(1, height)) * pixelRatio,
+    ];
+    const tl = [topLeft[0] * pixelRatio, topLeft[1] * pixelRatio];
+    const tr = [topRight[0] * pixelRatio, topRight[1] * pixelRatio];
+    const bl = [bottomLeft[0] * pixelRatio, bottomLeft[1] * pixelRatio];
+    for (let i = 1; i < width; i++) {
+      const k = i;
+      const sx = tl[0] + stepX[0] * k;
+      const sy = tl[1] + stepX[1] * k;
+      const ex = bl[0] + stepX[0] * k;
+      const ey = bl[1] + stepX[1] * k;
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(ex, ey);
+    }
+    for (let i = 1; i < height; i++) {
+      const k = i;
+      const sx = tl[0] + stepY[0] * k;
+      const sy = tl[1] + stepY[1] * k;
+      const ex = tr[0] + stepY[0] * k;
+      const ey = tr[1] + stepY[1] * k;
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(ex, ey);
+    }
   }
   ctx.stroke();
   ctx.restore();
@@ -1643,6 +1669,51 @@ function classifyDbzGreenCluster(r, g, b, items) {
   return low.distSq <= high.distSq ? low.item.label : high.item.label;
 }
 
+function getHeightLabelValue(label) {
+  const match = String(label || "").match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const value = Number(match[0]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function classifyHeightGreenCluster(r, g, b, items) {
+  const lowBand = [];
+  const highBand = [];
+  for (const item of items) {
+    const v = getHeightLabelValue(item.label);
+    if (v === 1 || v === 2 || v === 3) {
+      lowBand.push(item);
+    } else if (v === 12 || v === 13) {
+      highBand.push(item);
+    }
+  }
+  if (!lowBand.length || !highBand.length) return null;
+  const nearest = (group) => {
+    let best = group[0];
+    let bestDist = Infinity;
+    for (const p of group) {
+      const dr = r - p.rgb[0];
+      const dg = g - p.rgb[1];
+      const db = b - p.rgb[2];
+      const dist = dr * dr + dg * dg + db * db;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = p;
+      }
+    }
+    return { item: best, distSq: bestDist };
+  };
+  const low = nearest(lowBand);
+  const high = nearest(highBand);
+  // Для высоты ВГО: у 1-3 км синий канал заметно ближе к зеленому,
+  // у 12-13 км — выраженно "зеленее" (G >> B).
+  const greenBlueGap = g - b;
+  if (Math.abs(low.distSq - high.distSq) <= 24 * 24) {
+    return greenBlueGap > 45 ? high.item.label : low.item.label;
+  }
+  return low.distSq <= high.distSq ? low.item.label : high.item.label;
+}
+
 function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
   const cfg = getLegendConfigForSource(sourceKey);
   const items = cfg?.items || [];
@@ -1652,7 +1723,7 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
     (sourceKey === "bufr_height" ||
       sourceKey === "bufr_dbz1" ||
       sourceKey === "bufr_precip") &&
-    alpha < 24
+    alpha < 56
   ) {
     return items[0].label;
   }
@@ -1686,12 +1757,22 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
       if (fixed) return fixed;
     }
   }
+  if (sourceKey === "bufr_height") {
+    const bestVal = getHeightLabelValue(best.label);
+    const secondVal = getHeightLabelValue(second.label);
+    const isHeightAmbiguous = (v) =>
+      v === 1 || v === 2 || v === 3 || v === 12 || v === 13;
+    if (isHeightAmbiguous(bestVal) || isHeightAmbiguous(secondVal)) {
+      const fixed = classifyHeightGreenCluster(r, g, b, items);
+      if (fixed) return fixed;
+    }
+  }
 
   if (bestDist <= (cfg?.maxDist || PHENOMENA_MATCH_MAX_DIST)) return best.label;
   if (cfg?.forceNearest) return best.label;
 
-  // Для "Опасных явлений" оставляем чуть более мягкий fallback на синие ливневые тона.
-  if (sourceKey === SOURCE_HD || sourceKey === "bufr_phenomena") {
+  // Для "Опасных явлений HD" оставляем мягкий fallback на синие ливневые тона.
+  if (sourceKey === SOURCE_HD) {
     const looksBlueShower = b > g && b > r && r < 130;
     if (looksBlueShower) {
       const showerCandidates = PHENOMENA_LEGEND.filter((p) =>
@@ -1713,9 +1794,47 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
         return showerBest.label;
       }
     }
+    // Если точного совпадения нет, используем ближайший класс, но
+    // не подставляем "Смерч" как fallback (слишком редкий и тёмный класс).
+    const tornado = PHENOMENA_LEGEND[PHENOMENA_LEGEND.length - 1]?.label;
+    if (best.label === tornado && second?.label && second.label !== tornado) {
+      return second.label;
+    }
+    return best.label;
   }
 
   return null;
+}
+
+function getLegendLabelByNeighborhood(sourceKey, px, x, y, radius = 2) {
+  if (!px || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const votes = new Map();
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      const sx = x + dx;
+      const sy = y + dy;
+      if (sx < 0 || sy < 0 || sx >= px.width || sy >= px.height) continue;
+      const i = (sy * px.width + sx) * 4;
+      const r = px.data[i];
+      const g = px.data[i + 1];
+      const b = px.data[i + 2];
+      const a = px.data[i + 3];
+      const label = getLegendLabelByRgb(sourceKey, r, g, b, a);
+      if (!label) continue;
+      const weight = 1 / (1 + Math.abs(dx) + Math.abs(dy));
+      votes.set(label, (votes.get(label) || 0) + weight);
+    }
+  }
+  if (!votes.size) return null;
+  let bestLabel = null;
+  let bestScore = -1;
+  for (const [label, score] of votes.entries()) {
+    if (score > bestScore) {
+      bestScore = score;
+      bestLabel = label;
+    }
+  }
+  return bestLabel;
 }
 
 async function getFramePixels(url) {
@@ -1864,8 +1983,7 @@ async function inspectPrecipAtCrosshairCenter() {
     const r = px.data[i];
     const g = px.data[i + 1];
     const b = px.data[i + 2];
-    const a = px.data[i + 3];
-    const label = getLegendLabelByRgb(activeSource, r, g, b, a);
+    const label = getLegendLabelByNeighborhood(activeSource, px, x, y, 2);
     if (!label) {
       setPrecipInfo(`В перекрестии: неопределено (RGB ${r},${g},${b})`);
       return;
@@ -2411,8 +2529,7 @@ async function renderFrame(index) {
     satelliteReferenceLayer?.setVisible(activeSource === SOURCE_SATELLITE);
     timelineEl.value = String(currentFrame);
     timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
-    const layerLabel = getSourceDisplayName(activeSource);
-    setStatus(`кадр ${currentFrame + 1} / ${frames.length}`);
+    setStatus(`${currentFrame + 1}/${frames.length}`);
     updateLightningVisibilityForFrame(true);
     inspectPrecipAtCrosshairCenter().catch(() => {});
     return;
@@ -2481,8 +2598,7 @@ async function renderFrame(index) {
   );
   timelineEl.value = String(currentFrame);
   timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
-  const layerLabel = getSourceDisplayName(activeSource);
-  setStatus(`${layerLabel}: кадр ${currentFrame + 1} / ${frames.length}`);
+  setStatus(`${currentFrame + 1}/${frames.length}`);
   updateLightningVisibilityForFrame(true);
   inspectPrecipAtCrosshairCenter().catch(() => {});
 }

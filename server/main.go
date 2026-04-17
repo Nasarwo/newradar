@@ -4688,6 +4688,7 @@ func processGIF(g *gif.GIF, ref image.Image, mask image.Image, cityMask image.Im
 		cleanupCityMaskResiduals(outFrames[i], cityInfillMask, prevStable, nextStable)
 	}
 	cleanupConvectiveSpeckles(outFrames)
+	cleanupPurpleArtifactPixels(outFrames)
 	log.Printf("[process:%s] stage stabilize+cleanup done: elapsed=%s", batchID, time.Since(stageStabilizeStart).Round(time.Millisecond))
 
 	metrics := computeFrameBatchMetrics(outFrames)
@@ -6172,6 +6173,82 @@ func cleanupConvectiveSpeckles(frames []*image.RGBA) {
 					fr.SetRGBA(x+b.Min.X, y+b.Min.Y, color.RGBA{0, 0, 0, 0})
 				}
 			}
+		}
+	}
+}
+
+func isPurpleArtifactColor(c color.RGBA) bool {
+	if c.A == 0 {
+		return false
+	}
+	// Артефакты в HD-кадрах: #4A209C / #4D219C (+ небольшой допуск).
+	if c.R < 64 || c.R > 86 {
+		return false
+	}
+	if c.G < 22 || c.G > 44 {
+		return false
+	}
+	if c.B < 140 || c.B > 172 {
+		return false
+	}
+	// Удерживаем "фиолетовый" профиль: B >> R и низкий G.
+	return c.B > c.R+55 && c.G+40 < c.R
+}
+
+// cleanupPurpleArtifactPixels removes isolated purple spikes by snapping
+// them to the dominant surrounding pixel color.
+func cleanupPurpleArtifactPixels(frames []*image.RGBA) {
+	if len(frames) == 0 {
+		return
+	}
+	for _, fr := range frames {
+		if fr == nil {
+			continue
+		}
+		b := fr.Bounds()
+		w, h := b.Dx(), b.Dy()
+		if w < 3 || h < 3 {
+			continue
+		}
+		type pxFix struct {
+			x int
+			y int
+			c color.RGBA
+		}
+		fixes := make([]pxFix, 0, 128)
+		for y := 1; y < h-1; y++ {
+			for x := 1; x < w-1; x++ {
+				c := fr.RGBAAt(x+b.Min.X, y+b.Min.Y)
+				if !isPurpleArtifactColor(c) {
+					continue
+				}
+				neighborCounts := make(map[color.RGBA]int, 8)
+				bestColor := color.RGBA{}
+				bestCount := 0
+				for oy := -1; oy <= 1; oy++ {
+					for ox := -1; ox <= 1; ox++ {
+						if ox == 0 && oy == 0 {
+							continue
+						}
+						nc := fr.RGBAAt(x+ox+b.Min.X, y+oy+b.Min.Y)
+						if nc.A == 0 || isPurpleArtifactColor(nc) {
+							continue
+						}
+						neighborCounts[nc]++
+						if neighborCounts[nc] > bestCount {
+							bestCount = neighborCounts[nc]
+							bestColor = nc
+						}
+					}
+				}
+				// Только уверенное локальное большинство.
+				if bestCount >= 3 {
+					fixes = append(fixes, pxFix{x: x, y: y, c: bestColor})
+				}
+			}
+		}
+		for _, fix := range fixes {
+			fr.SetRGBA(fix.x+b.Min.X, fix.y+b.Min.Y, fix.c)
 		}
 	}
 }
