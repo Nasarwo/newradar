@@ -484,6 +484,11 @@ func loadDotEnvIntoProcess(candidates []string) {
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/icon.ico" || r.URL.Path == "/favicon.ico" {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.ServeFile(w, r, resolveIconPath())
+		return
+	}
 	if r.URL.Path == "/" {
 		http.ServeFile(w, r, filepath.Join(clientStaticDir, "index.html"))
 		return
@@ -495,6 +500,33 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeFile(w, r, filepath.Join(clientStaticDir, name))
+}
+
+func resolveIconPath() string {
+	candidates := []string{
+		filepath.Join("..", "icon.ico"),
+		filepath.Join(".", "icon.ico"),
+		filepath.Join(clientStaticDir, "icon.ico"),
+	}
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		candidates = append(
+			candidates,
+			filepath.Join(exeDir, "icon.ico"),
+			filepath.Join(exeDir, "..", "icon.ico"),
+			filepath.Join(exeDir, "..", "..", "icon.ico"),
+		)
+	}
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	// fallback: старое поведение
+	return filepath.Join("..", "icon.ico")
 }
 
 func handleLatest(w http.ResponseWriter, r *http.Request) {

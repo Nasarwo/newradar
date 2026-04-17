@@ -1718,6 +1718,63 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
   const cfg = getLegendConfigForSource(sourceKey);
   const items = cfg?.items || [];
   if (!items.length) return null;
+
+  // Для nowcast-слоёв используем только "чистое" сопоставление RGB с легендой.
+  // Здесь цвета должны совпадать 1-в-1, без эвристик и соседних пикселей.
+  if (sourceKey !== SOURCE_HD && sourceKey !== SOURCE_SATELLITE) {
+    if (alpha === 0) return items[0].label;
+    for (const p of items) {
+      if (r === p.rgb[0] && g === p.rgb[1] && b === p.rgb[2]) {
+        return p.label;
+      }
+    }
+    let best = null;
+    let bestDist = Infinity;
+    let second = null;
+    let secondDist = Infinity;
+    for (const p of items) {
+      const dr = r - p.rgb[0];
+      const dg = g - p.rgb[1];
+      const db = b - p.rgb[2];
+      const dist = dr * dr + dg * dg + db * db;
+      if (dist < bestDist) {
+        second = best;
+        secondDist = bestDist;
+        bestDist = dist;
+        best = p;
+      } else if (dist < secondDist) {
+        secondDist = dist;
+        second = p;
+      }
+    }
+    if (!best) return null;
+    if (sourceKey === "bufr_height") {
+      const bestVal = getHeightLabelValue(best.label);
+      const secondVal = getHeightLabelValue(second?.label || "");
+      const is3v13 =
+        (bestVal === 3 && secondVal === 13) || (bestVal === 13 && secondVal === 3);
+      if (is3v13) {
+        // 3 км заметно "синее", 13 км заметно "зеленее".
+        return b >= 102 ? "3.00 км" : "13.00 км";
+      }
+      const isHeightAmbiguous = (v) =>
+        v === 1 || v === 2 || v === 3 || v === 12 || v === 13;
+      if (isHeightAmbiguous(bestVal) || isHeightAmbiguous(secondVal)) {
+        const fixed = classifyHeightGreenCluster(r, g, b, items);
+        if (fixed) return fixed;
+      }
+    }
+    if (sourceKey === "bufr_dbz1") {
+      const bestVal = getDbzLabelValue(best.label);
+      const secondVal = getDbzLabelValue(second?.label || "");
+      const isGreenAmbiguous = (v) => v === 0 || v === 5 || v === 50 || v === 55;
+      if (isGreenAmbiguous(bestVal) || isGreenAmbiguous(secondVal)) {
+        const fixed = classifyDbzGreenCluster(r, g, b, items);
+        if (fixed) return fixed;
+      }
+    }
+    return best.label;
+  }
   if (alpha === 0) return items[0].label;
   if (
     (sourceKey === "bufr_height" ||
@@ -1835,6 +1892,365 @@ function getLegendLabelByNeighborhood(sourceKey, px, x, y, radius = 2) {
     }
   }
   return bestLabel;
+}
+
+function parseNumericFromLegendLabel(label, unitRegex) {
+  const text = String(label || "");
+  if (unitRegex && !unitRegex.test(text)) return null;
+  const match = text.match(/-?\d+(?:[.,]\d+)?/);
+  if (!match) return null;
+  const value = Number(match[0].replace(",", "."));
+  return Number.isFinite(value) ? value : null;
+}
+
+function pickNearestLegendByValue(items, value, unitRegex) {
+  if (!Array.isArray(items) || !items.length || !Number.isFinite(value)) return null;
+  let bestLabel = null;
+  let bestDiff = Infinity;
+  for (const item of items) {
+    const v = parseNumericFromLegendLabel(item.label, unitRegex);
+    if (!Number.isFinite(v)) continue;
+    const d = Math.abs(v - value);
+    if (d < bestDiff) {
+      bestDiff = d;
+      bestLabel = item.label;
+    }
+  }
+  return bestLabel;
+}
+
+function getNowcastQueryLayers(sourceKey) {
+  const key = String(sourceKey || "").trim();
+  if (!key) return [];
+  const suffixMatch = key.match(/^bufr_(.+)$/i);
+  if (!suffixMatch) return [key];
+  const suffix = suffixMatch[1];
+  const candidates = [key, `bufr_novosib_${suffix}`, `bufr_vlad_${suffix}`];
+  const available = new Set(
+    (Array.isArray(nowcastMeta?.layers) ? nowcastMeta.layers : [])
+      .map((l) => String(l?.name || "").trim())
+      .filter(Boolean),
+  );
+  if (!available.size) return candidates;
+  const filtered = candidates.filter((name) => available.has(name));
+  return filtered.length ? filtered : [key];
+}
+
+function parseRgbCssTriplet(text) {
+  const m = String(text || "").match(
+    /rgb\s*\(\s*(\d{1,3})\s*[,;]\s*(\d{1,3})\s*[,;]\s*(\d{1,3})\s*\)/i,
+  );
+  if (!m) return null;
+  const r = Number(m[1]);
+  const g = Number(m[2]);
+  const b = Number(m[3]);
+  if (
+    !Number.isFinite(r) ||
+    !Number.isFinite(g) ||
+    !Number.isFinite(b) ||
+    r < 0 ||
+    r > 255 ||
+    g < 0 ||
+    g > 255 ||
+    b < 0 ||
+    b > 255
+  ) {
+    return null;
+  }
+  return [r, g, b];
+}
+
+function parseHexColorToRgb(text) {
+  const m = String(text || "").match(/#([0-9a-f]{6})\b/i);
+  if (!m) return null;
+  const hex = m[1];
+  const r = Number.parseInt(hex.slice(0, 2), 16);
+  const g = Number.parseInt(hex.slice(2, 4), 16);
+  const b = Number.parseInt(hex.slice(4, 6), 16);
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) {
+    return null;
+  }
+  return [r, g, b];
+}
+
+function parseNumbersFromText(text) {
+  const matches = String(text || "").match(/-?\d+(?:[.,]\d+)?/g);
+  if (!matches) return [];
+  return matches
+    .map((raw) => Number(raw.replace(",", ".")))
+    .filter((n) => Number.isFinite(n));
+}
+
+function pickNearestLegendByRgb(items, rgb) {
+  if (!Array.isArray(items) || !items.length || !Array.isArray(rgb)) return null;
+  const [r, g, b] = rgb;
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) {
+    return null;
+  }
+  let best = null;
+  let bestDist = Infinity;
+  for (const item of items) {
+    const c = item?.rgb;
+    if (!Array.isArray(c) || c.length < 3) continue;
+    const dr = r - c[0];
+    const dg = g - c[1];
+    const db = b - c[2];
+    const dist = dr * dr + dg * dg + db * db;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = item.label;
+    }
+  }
+  return best;
+}
+
+function pickLegendByNumericCandidates(sourceKey, candidates) {
+  const nums = Array.isArray(candidates)
+    ? candidates.filter((n) => Number.isFinite(n))
+    : [];
+  if (!nums.length) return null;
+  if (sourceKey === "bufr_height") {
+    const kmCandidates = [];
+    for (const n of nums) {
+      if (n >= 0 && n <= 30) kmCandidates.push(n);
+      if (n >= 100 && n <= 30000) kmCandidates.push(n / 1000);
+    }
+    let bestLabel = null;
+    let bestDiff = Infinity;
+    for (const km of kmCandidates) {
+      const label = pickNearestLegendByValue(HEIGHT_LEGEND, km, /км/i);
+      if (!label) continue;
+      const labelVal = parseNumericFromLegendLabel(label, /км/i);
+      if (!Number.isFinite(labelVal)) continue;
+      const diff = Math.abs(labelVal - km);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestLabel = label;
+      }
+    }
+    return bestLabel;
+  }
+  if (sourceKey === "bufr_dbz1") {
+    const dbzCandidates = nums.filter((n) => n >= -60 && n <= 100);
+    let bestLabel = null;
+    let bestDiff = Infinity;
+    for (const n of dbzCandidates) {
+      const label = pickNearestLegendByValue(DBZ_LEGEND, n, /dbz/i);
+      if (!label) continue;
+      const labelVal = parseNumericFromLegendLabel(label, /dbz/i);
+      if (!Number.isFinite(labelVal)) continue;
+      const diff = Math.abs(labelVal - n);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestLabel = label;
+      }
+    }
+    return bestLabel;
+  }
+  if (sourceKey === "bufr_precip") {
+    const mmhCandidates = nums.filter((n) => n >= 0 && n <= 500);
+    let bestLabel = null;
+    let bestDiff = Infinity;
+    for (const n of mmhCandidates) {
+      if (n > 100) return ">100 мм/ч";
+      const label = pickNearestLegendByValue(PRECIP_LEGEND, n, /мм\/ч/i);
+      if (!label) continue;
+      const labelVal = parseNumericFromLegendLabel(label, /мм\/ч/i);
+      if (!Number.isFinite(labelVal)) continue;
+      const diff = Math.abs(labelVal - n);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestLabel = label;
+      }
+    }
+    return bestLabel;
+  }
+  return null;
+}
+
+function parseNowcastFeatureInfoRawByte(payloadText) {
+  const raw = String(payloadText || "");
+  const valueMatch = raw.match(/\bvar\s+value\s*=\s*(-?\d+(?:\.\d+)?)\s*;/i);
+  if (!valueMatch) return null;
+  const value = Number(valueMatch[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function decodeNowcastByteValueToLabel(sourceKey, byteValue) {
+  if (!Number.isFinite(byteValue)) return null;
+  const v = Math.round(byteValue);
+  if (sourceKey === "bufr_height") {
+    // Формула from nowcast demo: km = (value - 2) / 10.
+    if (v <= 1) return null;
+    const km = (v - 2) / 10;
+    return pickNearestLegendByValue(HEIGHT_LEGEND, km, /км/i);
+  }
+  if (sourceKey === "bufr_dbz1") {
+    // Формула from nowcast demo: dBZ = -31.5 + (value-1)*127/254.
+    if (v <= 1) return null;
+    const dbz = -31.5 + ((v - 1) * (31.5 + 95.5)) / 254;
+    return pickNearestLegendByValue(DBZ_LEGEND, dbz, /dbz/i);
+  }
+  if (sourceKey === "bufr_precip") {
+    // Формула from nowcast demo (Z-R): value(byte) -> dBZ -> mm/h.
+    if (v <= 1) return null;
+    const lgz = (-31.5 + ((v - 1) * (31.5 + 95.5)) / 254) * 0.1;
+    const mmh = Math.pow(10, (lgz - Math.log10(200)) / 1.6);
+    if (!Number.isFinite(mmh)) return null;
+    if (mmh > 100) return ">100 мм/ч";
+    return pickNearestLegendByValue(PRECIP_LEGEND, mmh, /мм\/ч/i);
+  }
+  if (sourceKey === "bufr_phenomena") {
+    const byCode = {
+      1: "Обл. сред. яруса",
+      2: "Сл. образования",
+      3: "Осадки слабые",
+      4: "Осадки умеренные",
+      5: "Осадки сильные",
+      6: "Кучевая обл",
+      7: "Ливень слабый",
+      8: "Ливень умеренный",
+      9: "Ливень сильный",
+      10: "Гроза (R)",
+      11: "Гроза R",
+      12: "Гроза R+",
+      13: "Град слабый",
+      14: "Град умеренный",
+      15: "Град сильный",
+      16: "Шквал слабый",
+      17: "Шквал умеренный",
+      18: "Шквал сильный",
+      19: "Смерч",
+    };
+    return byCode[v] || null;
+  }
+  return null;
+}
+
+function parseNowcastFeatureInfoLabel(sourceKey, payloadText) {
+  const raw = String(payloadText || "");
+  const rawByteValue = parseNowcastFeatureInfoRawByte(raw);
+  const byRawByte = decodeNowcastByteValueToLabel(sourceKey, rawByteValue);
+  if (byRawByte) return byRawByte;
+
+  const text = String(payloadText || "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&quot;/gi, '"')
+    .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return null;
+  const lc = text.toLowerCase();
+
+  if (sourceKey === "bufr_phenomena") {
+    for (const item of PHENOMENA_LEGEND) {
+      if (lc.includes(String(item.label || "").toLowerCase())) return item.label;
+    }
+    const rgbFromCss = parseRgbCssTriplet(raw) || parseHexColorToRgb(raw);
+    if (rgbFromCss) {
+      const byColor = pickNearestLegendByRgb(PHENOMENA_LEGEND, rgbFromCss);
+      if (byColor) return byColor;
+    }
+    return null;
+  }
+  if (sourceKey === "bufr_height") {
+    const kmMatch = lc.match(/(-?\d+(?:[.,]\d+)?)\s*км/);
+    if (kmMatch) {
+      const value = Number(kmMatch[1].replace(",", "."));
+      const byKm = pickNearestLegendByValue(HEIGHT_LEGEND, value, /км/i);
+      if (byKm) return byKm;
+    }
+    const mMatch = lc.match(/(-?\d+(?:[.,]\d+)?)\s*м\b/);
+    if (mMatch) {
+      const meters = Number(mMatch[1].replace(",", "."));
+      const byM = pickNearestLegendByValue(HEIGHT_LEGEND, meters / 1000, /км/i);
+      if (byM) return byM;
+    }
+    return null;
+  }
+  if (sourceKey === "bufr_dbz1") {
+    const dbzMatch = lc.match(/(-?\d+(?:[.,]\d+)?)\s*d?bz/);
+    if (dbzMatch) {
+      const value = Number(dbzMatch[1].replace(",", "."));
+      const byDbz = pickNearestLegendByValue(DBZ_LEGEND, value, /dbz/i);
+      if (byDbz) return byDbz;
+    }
+    return null;
+  }
+  if (sourceKey === "bufr_precip") {
+    const mmhMatch = lc.match(/(-?\d+(?:[.,]\d+)?)\s*мм\/ч/);
+    if (mmhMatch) {
+      const value = Number(mmhMatch[1].replace(",", "."));
+      if (value > 100) return ">100 мм/ч";
+      const byMmh = pickNearestLegendByValue(PRECIP_LEGEND, value, /мм\/ч/i);
+      if (byMmh) return byMmh;
+    }
+    return null;
+  }
+  return null;
+}
+
+async function fetchNowcastFeatureInfoLabel(sourceKey, frame, coord3857) {
+  if (!sourceKey || !frame || !Array.isArray(coord3857) || coord3857.length < 2) {
+    return null;
+  }
+  if (!Array.isArray(frame.imageExtent) || frame.imageExtent.length !== 4) return null;
+  const projection = String(frame.projection || "").toUpperCase();
+  if (projection !== "EPSG:3857") return null;
+  const [west, south, east, north] = frame.imageExtent;
+  const imageWidth = Number(frame.imageWidth || radarImageSize?.[0] || 0);
+  const imageHeight = Number(frame.imageHeight || radarImageSize?.[1] || 0);
+  if (!(east > west && north > south && imageWidth > 1 && imageHeight > 1)) return null;
+
+  const pixelSizeX = (east - west) / imageWidth;
+  const pixelSizeY = (north - south) / imageHeight;
+  const sampleWidth = 101;
+  const sampleHeight = 101;
+  const halfW = (pixelSizeX * sampleWidth) / 2;
+  const halfH = (pixelSizeY * sampleHeight) / 2;
+  const cx = Number(coord3857[0]);
+  const cy = Number(coord3857[1]);
+  if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+
+  const reqWest = cx - halfW;
+  const reqEast = cx + halfW;
+  const reqSouth = cy - halfH;
+  const reqNorth = cy + halfH;
+  const queryLayers = getNowcastQueryLayers(sourceKey);
+  const layersCsv = queryLayers.join(",");
+  if (!layersCsv) return null;
+  const timeIso = new Date(frame.timestamp || Date.now())
+    .toISOString()
+    .replace(/\.\d{3}Z$/, "Z");
+  const params = new URLSearchParams({
+    SERVICE: "WMS",
+    VERSION: NOWCAST_WMS_VERSION,
+    REQUEST: "GetFeatureInfo",
+    INFO_FORMAT: "text/html",
+    QUERY_LAYERS: layersCsv,
+    LAYERS: layersCsv,
+    FORMAT: "image/png",
+    STYLES: "",
+    TRANSPARENT: "TRUE",
+    TIME: timeIso,
+    WIDTH: String(sampleWidth),
+    HEIGHT: String(sampleHeight),
+    CRS: "EPSG:3857",
+    I: "50",
+    J: "50",
+    BBOX: `${reqWest},${reqSouth},${reqEast},${reqNorth}`,
+  });
+  try {
+    const response = await fetch(`/api/nowcast/wms?${params.toString()}`, {
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    const text = await response.text();
+    return parseNowcastFeatureInfoLabel(sourceKey, text);
+  } catch {
+    return null;
+  }
 }
 
 async function getFramePixels(url) {
@@ -1970,9 +2386,15 @@ async function inspectPrecipAtCrosshairCenter() {
     const [west, south, east, north] = extent;
     if (!(east > west && north > south)) return;
 
-    const x = Math.round(((coordX - west) / (east - west)) * (px.width - 1));
-    const y = Math.round(
-      ((north - coordY) / (north - south)) * (px.height - 1),
+    const xNorm = (coordX - west) / (east - west);
+    const yNorm = (north - coordY) / (north - south);
+    const x = Math.min(
+      px.width - 1,
+      Math.max(0, Math.floor(xNorm * px.width)),
+    );
+    const y = Math.min(
+      px.height - 1,
+      Math.max(0, Math.floor(yNorm * px.height)),
     );
     if (x < 0 || x >= px.width || y < 0 || y >= px.height) {
       setPrecipInfo("В перекрестии: вне зоны радарного кадра");
@@ -1983,7 +2405,19 @@ async function inspectPrecipAtCrosshairCenter() {
     const r = px.data[i];
     const g = px.data[i + 1];
     const b = px.data[i + 2];
-    const label = getLegendLabelByNeighborhood(activeSource, px, x, y, 2);
+    let label = getLegendLabelByRgb(activeSource, r, g, b, px.data[i + 3]);
+    if (
+      !label &&
+      activeSource !== SOURCE_HD &&
+      activeSource !== SOURCE_SATELLITE &&
+      projection === "EPSG:3857"
+    ) {
+      label = await fetchNowcastFeatureInfoLabel(activeSource, frame, center3857);
+      if (probeToken !== centerProbeToken) return;
+    }
+    if (!label && activeSource === SOURCE_HD) {
+      label = getLegendLabelByNeighborhood(activeSource, px, x, y, 1);
+    }
     if (!label) {
       setPrecipInfo(`В перекрестии: неопределено (RGB ${r},${g},${b})`);
       return;
