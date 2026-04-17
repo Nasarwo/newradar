@@ -156,6 +156,13 @@ var (
 	eumetTokenExpiry   time.Time
 )
 
+func resetNowcastAccessToken() {
+	nowcastTokenMu.Lock()
+	nowcastAccessToken = ""
+	nowcastTokenExpiry = time.Time{}
+	nowcastTokenMu.Unlock()
+}
+
 type wmsCapabilities struct {
 	Capability struct {
 		Layer wmsLayer `xml:"Layer"`
@@ -2716,45 +2723,84 @@ func fetchNowcastAndMaybeCache(
 	if err != nil {
 		return nil, "", 0, err
 	}
-	upstreamValues, err := withNowcastAccessToken(ctx, values)
-	if err != nil {
-		return nil, "", 0, err
-	}
-	upstreamURL := nowcastWMSBaseURL + "?" + canonicalNowcastQuery(upstreamValues)
-	reqURL, _ := url.Parse(upstreamURL)
-	layer := ""
-	timeVal := ""
-	if reqURL != nil {
-		layer = strings.TrimSpace(firstNonEmpty(reqURL.Query().Get("LAYERS"), reqURL.Query().Get("layers")))
-		timeVal = strings.TrimSpace(firstNonEmpty(reqURL.Query().Get("TIME"), reqURL.Query().Get("time")))
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamURL, nil)
-	if err != nil {
-		return nil, "", 0, err
-	}
-	req.Header.Set("Referer", nowcastReferer)
-	req.Header.Set("User-Agent", nowcastUserAgent)
-	req.Header.Set("Accept", "image/png,application/xml,text/xml,*/*")
+	var lastBody []byte
+	var lastContentType string
+	var lastStatus int
+	for attempt := 0; attempt < 2; attempt++ {
+		upstreamValues, err := withNowcastAccessToken(ctx, values)
+		if err != nil {
+			return nil, "", 0, err
+		}
+		upstreamURL := nowcastWMSBaseURL + "?" + canonicalNowcastQuery(upstreamValues)
+		reqURL, _ := url.Parse(upstreamURL)
+		layer := ""
+		timeVal := ""
+		if reqURL != nil {
+			layer = strings.TrimSpace(firstNonEmpty(reqURL.Query().Get("LAYERS"), reqURL.Query().Get("layers")))
+			timeVal = strings.TrimSpace(firstNonEmpty(reqURL.Query().Get("TIME"), reqURL.Query().Get("time")))
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamURL, nil)
+		if err != nil {
+			return nil, "", 0, err
+		}
+		req.Header.Set("Referer", nowcastReferer)
+		req.Header.Set("User-Agent", nowcastUserAgent)
+		req.Header.Set("Accept", "image/png,application/xml,text/xml,*/*")
 
-	resp, err := nowcastHTTP.Do(req)
-	if err != nil {
-		return nil, "", 0, err
-	}
-	defer resp.Body.Close()
+		resp, err := nowcastHTTP.Do(req)
+		if err != nil {
+			return nil, "", 0, err
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, "", 0, err
+		}
+		contentType := resp.Header.Get("Content-Type")
+		if contentType == "" {
+			contentType = http.DetectContentType(body)
+		}
+		lastBody = body
+		lastContentType = contentType
+		lastStatus = resp.StatusCode
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", 0, err
+		if allowCacheWrite && resp.StatusCode == http.StatusOK && (reqType == "getmap" || reqType == "getcapabilities") {
+			writeNowcastCache(canonical, contentType, body)
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			preview := strings.TrimSpace(string(body))
+			if len(preview) > 280 {
+				preview = preview[:280] + "..."
+			}
+			log.Printf(
+				"[nowcast/upstream] %s auth/reject: status=%d attempt=%d layer=%q time=%q content_type=%q body=%q",
+				strings.ToUpper(reqType),
+				resp.StatusCode,
+				attempt+1,
+				layer,
+				timeVal,
+				contentType,
+				preview,
+			)
+			if attempt == 0 {
+				resetNowcastAccessToken()
+				continue
+			}
+		}
+
+		log.Printf(
+			"[nowcast/upstream] %s: status=%d bytes=%d attempt=%d layer=%q time=%q",
+			strings.ToUpper(reqType),
+			resp.StatusCode,
+			len(body),
+			attempt+1,
+			layer,
+			timeVal,
+		)
+		return body, contentType, resp.StatusCode, nil
 	}
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = http.DetectContentType(body)
-	}
-	if allowCacheWrite && resp.StatusCode == http.StatusOK && (reqType == "getmap" || reqType == "getcapabilities") {
-		writeNowcastCache(canonical, contentType, body)
-	}
-	log.Printf("[nowcast/upstream] %s: status=%d bytes=%d layer=%q time=%q", strings.ToUpper(reqType), resp.StatusCode, len(body), layer, timeVal)
-	return body, contentType, resp.StatusCode, nil
+	return lastBody, lastContentType, lastStatus, nil
 }
 
 func handleNowcastWMSProxy(w http.ResponseWriter, r *http.Request) {

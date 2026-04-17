@@ -268,6 +268,7 @@ const NOWCAST_EDGE_COLOR_DIFF = 42;
 const NOWCAST_PIXEL_GAP_OVERLAY = true;
 const NOWCAST_PIXEL_GAP_MIN_SCREEN_PX = 3;
 const NOWCAST_PIXEL_GAP_MAX_SCREEN_PX = 1.25;
+const NOWCAST_CROSSHAIR_DEBUG = false;
 let frameRenderToken = 0;
 let centerProbeToken = 0;
 let viewportSyncTimer = null;
@@ -280,6 +281,21 @@ const satelliteTileStyleCache = new Map();
 const satelliteTileStyleOrder = [];
 let satelliteBaseMode = SATELLITE_STYLE_HD_DAY;
 let satelliteColorizedEnabled = false;
+
+function logNowcastCrosshair(event, details = undefined, level = "log") {
+  if (!NOWCAST_CROSSHAIR_DEBUG) return;
+  const logger =
+    level === "warn"
+      ? console.warn
+      : level === "error"
+        ? console.error
+        : console.log;
+  if (typeof details === "undefined") {
+    logger(`[crosshair-nowcast] ${event}`);
+    return;
+  }
+  logger(`[crosshair-nowcast] ${event}`, details);
+}
 
 function updateSatelliteStylePanelVisibility() {
   satelliteStylePanelEl?.classList.toggle(
@@ -2065,13 +2081,27 @@ function parseNowcastFeatureInfoRawByte(payloadText) {
   return Number.isFinite(value) ? value : null;
 }
 
+function formatNowcastHeightKmLabel(kmValue) {
+  const km = Number(kmValue);
+  if (!Number.isFinite(km) || km < 0) return null;
+  return `${km.toFixed(1)} км`;
+}
+
+function formatNowcastPrecipLabel(mmhValue) {
+  const mmh = Number(mmhValue);
+  if (!Number.isFinite(mmh) || mmh <= 0) return null;
+  if (mmh > 100) return ">100 мм/ч";
+  const decimals = mmh < 1 ? 2 : 1;
+  return `${mmh.toFixed(decimals)} мм/ч`;
+}
+
 function decodeNowcastByteValueToLabel(sourceKey, byteValue) {
   if (!Number.isFinite(byteValue)) return null;
   const v = Math.round(byteValue);
   if (sourceKey === "bufr_height") {
     if (v <= 1) return null;
     const km = (v - 2) / 10;
-    return pickNearestLegendByValue(HEIGHT_LEGEND, km, /км/i);
+    return formatNowcastHeightKmLabel(km);
   }
   if (sourceKey === "bufr_dbz1") {
     if (v <= 1) return null;
@@ -2082,9 +2112,7 @@ function decodeNowcastByteValueToLabel(sourceKey, byteValue) {
     if (v <= 1) return null;
     const lgz = (-31.5 + ((v - 1) * (31.5 + 95.5)) / 254) * 0.1;
     const mmh = Math.pow(10, (lgz - Math.log10(200)) / 1.6);
-    if (!Number.isFinite(mmh)) return null;
-    if (mmh > 100) return ">100 мм/ч";
-    return pickNearestLegendByValue(PRECIP_LEGEND, mmh, /мм\/ч/i);
+    return formatNowcastPrecipLabel(mmh);
   }
   if (sourceKey === "bufr_phenomena") {
     const byCode = {
@@ -2144,14 +2172,14 @@ function parseNowcastFeatureInfoLabel(sourceKey, payloadText) {
     const kmMatch = lc.match(/(-?\d+(?:[.,]\d+)?)\s*км/);
     if (kmMatch) {
       const value = Number(kmMatch[1].replace(",", "."));
-      const byKm = pickNearestLegendByValue(HEIGHT_LEGEND, value, /км/i);
-      if (byKm) return byKm;
+      const exactKm = formatNowcastHeightKmLabel(value);
+      if (exactKm) return exactKm;
     }
     const mMatch = lc.match(/(-?\d+(?:[.,]\d+)?)\s*м\b/);
     if (mMatch) {
       const meters = Number(mMatch[1].replace(",", "."));
-      const byM = pickNearestLegendByValue(HEIGHT_LEGEND, meters / 1000, /км/i);
-      if (byM) return byM;
+      const exactByMeters = formatNowcastHeightKmLabel(meters / 1000);
+      if (exactByMeters) return exactByMeters;
     }
     return null;
   }
@@ -2168,9 +2196,8 @@ function parseNowcastFeatureInfoLabel(sourceKey, payloadText) {
     const mmhMatch = lc.match(/(-?\d+(?:[.,]\d+)?)\s*мм\/ч/);
     if (mmhMatch) {
       const value = Number(mmhMatch[1].replace(",", "."));
-      if (value > 100) return ">100 мм/ч";
-      const byMmh = pickNearestLegendByValue(PRECIP_LEGEND, value, /мм\/ч/i);
-      if (byMmh) return byMmh;
+      const exactMmh = formatNowcastPrecipLabel(value);
+      if (exactMmh) return exactMmh;
     }
     return null;
   }
@@ -2179,15 +2206,38 @@ function parseNowcastFeatureInfoLabel(sourceKey, payloadText) {
 
 async function fetchNowcastFeatureInfoLabel(sourceKey, frame, coord3857) {
   if (!sourceKey || !frame || !Array.isArray(coord3857) || coord3857.length < 2) {
+    logNowcastCrosshair("wms-skip-invalid-input", {
+      sourceKey,
+      hasFrame: Boolean(frame),
+      hasCoord: Array.isArray(coord3857),
+      coordLength: Array.isArray(coord3857) ? coord3857.length : null,
+    });
     return null;
   }
-  if (!Array.isArray(frame.imageExtent) || frame.imageExtent.length !== 4) return null;
+  if (!Array.isArray(frame.imageExtent) || frame.imageExtent.length !== 4) {
+    logNowcastCrosshair("wms-skip-invalid-extent", {
+      sourceKey,
+      imageExtent: frame.imageExtent,
+    });
+    return null;
+  }
   const projection = String(frame.projection || "").toUpperCase();
-  if (projection !== "EPSG:3857") return null;
+  if (projection !== "EPSG:3857") {
+    logNowcastCrosshair("wms-skip-projection", { sourceKey, projection });
+    return null;
+  }
   const [west, south, east, north] = frame.imageExtent;
   const imageWidth = Number(frame.imageWidth || radarImageSize?.[0] || 0);
   const imageHeight = Number(frame.imageHeight || radarImageSize?.[1] || 0);
-  if (!(east > west && north > south && imageWidth > 1 && imageHeight > 1)) return null;
+  if (!(east > west && north > south && imageWidth > 1 && imageHeight > 1)) {
+    logNowcastCrosshair("wms-skip-invalid-frame-metrics", {
+      sourceKey,
+      extent: [west, south, east, north],
+      imageWidth,
+      imageHeight,
+    });
+    return null;
+  }
 
   const pixelSizeX = (east - west) / imageWidth;
   const pixelSizeY = (north - south) / imageHeight;
@@ -2197,25 +2247,28 @@ async function fetchNowcastFeatureInfoLabel(sourceKey, frame, coord3857) {
   const halfH = (pixelSizeY * sampleHeight) / 2;
   const cx = Number(coord3857[0]);
   const cy = Number(coord3857[1]);
-  if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+  if (!Number.isFinite(cx) || !Number.isFinite(cy)) {
+    logNowcastCrosshair("wms-skip-invalid-center", { sourceKey, cx, cy });
+    return null;
+  }
 
   const reqWest = cx - halfW;
   const reqEast = cx + halfW;
   const reqSouth = cy - halfH;
   const reqNorth = cy + halfH;
   const queryLayers = getNowcastQueryLayers(sourceKey);
-  const layersCsv = queryLayers.join(",");
-  if (!layersCsv) return null;
+  if (!queryLayers.length) {
+    logNowcastCrosshair("wms-skip-empty-query-layers", { sourceKey });
+    return null;
+  }
   const timeIso = new Date(frame.timestamp || Date.now())
     .toISOString()
     .replace(/\.\d{3}Z$/, "Z");
-  const params = new URLSearchParams({
+  const baseParams = {
     SERVICE: "WMS",
     VERSION: NOWCAST_WMS_VERSION,
     REQUEST: "GetFeatureInfo",
     INFO_FORMAT: "text/html",
-    QUERY_LAYERS: layersCsv,
-    LAYERS: layersCsv,
     FORMAT: "image/png",
     STYLES: "",
     TRANSPARENT: "TRUE",
@@ -2226,15 +2279,70 @@ async function fetchNowcastFeatureInfoLabel(sourceKey, frame, coord3857) {
     I: "50",
     J: "50",
     BBOX: `${reqWest},${reqSouth},${reqEast},${reqNorth}`,
-  });
+  };
   try {
-    const response = await fetch(`/api/nowcast/wms?${params.toString()}`, {
-      cache: "no-store",
-    });
-    if (!response.ok) return null;
-    const text = await response.text();
-    return parseNowcastFeatureInfoLabel(sourceKey, text);
-  } catch {
+    for (let idx = 0; idx < queryLayers.length; idx++) {
+      const layerName = queryLayers[idx];
+      const params = new URLSearchParams(baseParams);
+      params.set("QUERY_LAYERS", layerName);
+      params.set("LAYERS", layerName);
+      logNowcastCrosshair("wms-request", {
+        sourceKey,
+        layerName,
+        layerIndex: idx + 1,
+        layerCount: queryLayers.length,
+        projection,
+        timeIso,
+        sampleSize: `${sampleWidth}x${sampleHeight}`,
+        bbox: `${reqWest},${reqSouth},${reqEast},${reqNorth}`,
+        center3857: [cx, cy],
+      });
+      const response = await fetch(`/api/nowcast/wms?${params.toString()}`, {
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        logNowcastCrosshair(
+          "wms-response-not-ok",
+          {
+            sourceKey,
+            layerName,
+            layerIndex: idx + 1,
+            status: response.status,
+            statusText: response.statusText,
+          },
+          "warn",
+        );
+        continue;
+      }
+      const text = await response.text();
+      const rawByte = parseNowcastFeatureInfoRawByte(text);
+      const parsedLabel = parseNowcastFeatureInfoLabel(sourceKey, text);
+      logNowcastCrosshair("wms-response-parse", {
+        sourceKey,
+        layerName,
+        layerIndex: idx + 1,
+        responseChars: text.length,
+        rawByte,
+        parsedLabel,
+        preview: text.slice(0, 260),
+      });
+      if (parsedLabel) return parsedLabel;
+    }
+    logNowcastCrosshair(
+      "wms-all-layers-empty",
+      { sourceKey, queryLayers, timeIso },
+      "warn",
+    );
+    return null;
+  } catch (e) {
+    logNowcastCrosshair(
+      "wms-request-failed",
+      {
+        sourceKey,
+        error: e?.message || String(e),
+      },
+      "error",
+    );
     return null;
   }
 }
@@ -2347,11 +2455,30 @@ async function inspectPrecipAtCrosshairCenter() {
   const frame = frames[currentFrame];
   if (!frame?.url) return;
   const probeToken = ++centerProbeToken;
+  logNowcastCrosshair("probe-start", {
+    probeToken,
+    activeSource,
+    currentFrame,
+    frameUrl: frame?.url || "",
+    frameProjection: frame?.projection || "",
+    frameTimestamp: frame?.timestamp
+      ? new Date(frame.timestamp).toISOString?.() || String(frame.timestamp)
+      : null,
+  });
   try {
     const center3857 = map.getView()?.getCenter?.();
-    if (!Array.isArray(center3857) || center3857.length < 2) return;
+    if (!Array.isArray(center3857) || center3857.length < 2) {
+      logNowcastCrosshair("probe-skip-invalid-center", { probeToken, center3857 });
+      return;
+    }
     const px = await getFramePixels(frame.url);
-    if (probeToken !== centerProbeToken) return;
+    if (probeToken !== centerProbeToken) {
+      logNowcastCrosshair("probe-abort-token-mismatch-after-pixels", {
+        probeToken,
+        currentToken: centerProbeToken,
+      });
+      return;
+    }
 
     const projection = frame?.projection || "EPSG:4326";
     const extent =
@@ -2360,7 +2487,14 @@ async function inspectPrecipAtCrosshairCenter() {
         : projection === "EPSG:3857"
           ? geoBounds3857
           : geoBounds;
-    if (!Array.isArray(extent) || extent.length < 4) return;
+    if (!Array.isArray(extent) || extent.length < 4) {
+      logNowcastCrosshair("probe-skip-invalid-extent", {
+        probeToken,
+        extent,
+        projection,
+      });
+      return;
+    }
 
     let coordX = center3857[0];
     let coordY = center3857[1];
@@ -2370,7 +2504,13 @@ async function inspectPrecipAtCrosshairCenter() {
       coordY = ll[1];
     }
     const [west, south, east, north] = extent;
-    if (!(east > west && north > south)) return;
+    if (!(east > west && north > south)) {
+      logNowcastCrosshair("probe-skip-bad-extent-bounds", {
+        probeToken,
+        extent: [west, south, east, north],
+      });
+      return;
+    }
 
     const xNorm = (coordX - west) / (east - west);
     const yNorm = (north - coordY) / (north - south);
@@ -2383,6 +2523,13 @@ async function inspectPrecipAtCrosshairCenter() {
       Math.max(0, Math.floor(yNorm * px.height)),
     );
     if (x < 0 || x >= px.width || y < 0 || y >= px.height) {
+      logNowcastCrosshair("probe-out-of-frame", {
+        probeToken,
+        x,
+        y,
+        width: px.width,
+        height: px.height,
+      });
       setPrecipInfo("В перекрестии: вне зоны радарного кадра");
       return;
     }
@@ -2391,25 +2538,99 @@ async function inspectPrecipAtCrosshairCenter() {
     const r = px.data[i];
     const g = px.data[i + 1];
     const b = px.data[i + 2];
-    let label = getLegendLabelByRgb(activeSource, r, g, b, px.data[i + 3]);
-    if (
-      !label &&
-      activeSource !== SOURCE_HD &&
-      activeSource !== SOURCE_SATELLITE &&
-      projection === "EPSG:3857"
-    ) {
+    const alpha = px.data[i + 3];
+    const legacyLabel = getLegendLabelByRgb(activeSource, r, g, b, alpha);
+    const isNowcastLayer =
+      activeSource !== SOURCE_HD && activeSource !== SOURCE_SATELLITE;
+    let label = null;
+    let labelSource = "none";
+    if (isNowcastLayer && projection === "EPSG:3857") {
+      logNowcastCrosshair("probe-trying-nowcast-host", {
+        probeToken,
+        activeSource,
+        reason: "nowcast-priority",
+      });
       label = await fetchNowcastFeatureInfoLabel(activeSource, frame, center3857);
-      if (probeToken !== centerProbeToken) return;
+      if (probeToken !== centerProbeToken) {
+        logNowcastCrosshair("probe-abort-token-mismatch-after-host", {
+          probeToken,
+          currentToken: centerProbeToken,
+        });
+        return;
+      }
+      if (label) {
+        labelSource = "nowcast-host";
+      } else {
+        logNowcastCrosshair(
+          "probe-host-empty-fallback-legacy",
+          { probeToken, activeSource, rgb: [r, g, b], alpha },
+          "warn",
+        );
+      }
+    }
+    if (!label) {
+      label = legacyLabel;
+      if (label) {
+        labelSource = "legacy-rgb";
+      }
+    }
+    logNowcastCrosshair("probe-pixel-sample", {
+      probeToken,
+      activeSource,
+      rgb: [r, g, b],
+      alpha,
+      pixel: [x, y],
+      extent: [west, south, east, north],
+      coord3857: center3857,
+      labelByRgb: legacyLabel,
+    });
+    if (!label && !(isNowcastLayer && projection === "EPSG:3857")) {
+      logNowcastCrosshair("probe-host-skipped", {
+        probeToken,
+        activeSource,
+        projection,
+        reason:
+          activeSource === SOURCE_HD
+            ? "hd-layer"
+            : activeSource === SOURCE_SATELLITE
+              ? "satellite-layer"
+              : projection !== "EPSG:3857"
+                ? "non-3857-projection"
+                : "condition-not-met",
+      });
     }
     if (!label && activeSource === SOURCE_HD) {
       label = getLegendLabelByNeighborhood(activeSource, px, x, y, 1);
+      if (label) {
+        labelSource = "hd-neighborhood";
+      }
     }
     if (!label) {
+      logNowcastCrosshair(
+        "probe-unresolved",
+        { probeToken, activeSource, rgb: [r, g, b], alpha },
+        "warn",
+      );
       setPrecipInfo(`В перекрестии: неопределено (RGB ${r},${g},${b})`);
       return;
     }
+    logNowcastCrosshair("probe-success", {
+      probeToken,
+      activeSource,
+      label,
+      labelSource,
+    });
     setPrecipInfo(`В перекрестии: ${label}`);
-  } catch {
+  } catch (e) {
+    logNowcastCrosshair(
+      "probe-error",
+      {
+        probeToken,
+        activeSource,
+        error: e?.message || String(e),
+      },
+      "error",
+    );
     if (probeToken === centerProbeToken) {
       setPrecipInfo("В перекрестии: не удалось определить тип");
     }

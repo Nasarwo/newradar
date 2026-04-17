@@ -543,8 +543,12 @@ input[type="range"]::-moz-range-thumb {
   align-items: center;
 }
 .satellite-style-panel {
+  position: absolute;
+  top: 7.5px;
+  right: 10px;
+  z-index: 1000;
   background: rgba(255, 255, 255, 0.97);
-  border: 1px solid #d0d7de;
+  border: 1px solid #666666;
   border-radius: 8px;
   padding: 10px 12px;
   box-shadow:
@@ -618,8 +622,10 @@ input[type="range"]::-moz-range-thumb {
     max-width: 56vw;
   }
   .satellite-style-panel {
+    top: 12px;
+    right: 12px;
     min-width: 0;
-    width: min(34vw, 320px);
+    width: min(74vw, 300px);
     padding: 8px 10px;
   }
   .control-panel {
@@ -663,6 +669,9 @@ input[type="range"]::-moz-range-thumb {
     display: none !important;
   }
   .legend-panel {
+    display: none !important;
+  }
+  .satellite-style-panel {
     display: none !important;
   }
   .control-panel {
