@@ -1249,7 +1249,9 @@ function renderNowcastPixelGapOverlay(event) {
   const width = Number(frame.imageWidth || radarImageSize?.[0] || 0);
   const height = Number(frame.imageHeight || radarImageSize?.[1] || 0);
   if (!(width > 1 && height > 1)) return;
-  const frameProjection = String(frame?.projection || "EPSG:4326").toUpperCase();
+  const frameProjection = String(
+    frame?.projection || "EPSG:4326",
+  ).toUpperCase();
   const ctx = event?.context;
   if (!ctx) return;
 
@@ -1311,7 +1313,8 @@ function renderNowcastPixelGapOverlay(event) {
   ctx.lineWidth = gapWidth;
   ctx.beginPath();
   if (frameProjection !== "EPSG:3857") {
-    const toMap3857 = (x, y) => ol.proj.transform([x, y], frameProjection, "EPSG:3857");
+    const toMap3857 = (x, y) =>
+      ol.proj.transform([x, y], frameProjection, "EPSG:3857");
     const lonSpan = sourceEast - sourceWest;
     const latSpan = sourceNorth - sourceSouth;
     for (let i = 1; i < width; i++) {
@@ -1761,7 +1764,8 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
       const bestVal = getHeightLabelValue(best.label);
       const secondVal = getHeightLabelValue(second?.label || "");
       const is3v13 =
-        (bestVal === 3 && secondVal === 13) || (bestVal === 13 && secondVal === 3);
+        (bestVal === 3 && secondVal === 13) ||
+        (bestVal === 13 && secondVal === 3);
       if (is3v13) {
         return b >= 102 ? "3.00 км" : "13.00 км";
       }
@@ -1775,7 +1779,8 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
     if (sourceKey === "bufr_dbz1") {
       const bestVal = getDbzLabelValue(best.label);
       const secondVal = getDbzLabelValue(second?.label || "");
-      const isGreenAmbiguous = (v) => v === 0 || v === 5 || v === 50 || v === 55;
+      const isGreenAmbiguous = (v) =>
+        v === 0 || v === 5 || v === 50 || v === 55;
       if (isGreenAmbiguous(bestVal) || isGreenAmbiguous(secondVal)) {
         const fixed = classifyDbzGreenCluster(r, g, b, items);
         if (fixed) return fixed;
@@ -1909,7 +1914,8 @@ function parseNumericFromLegendLabel(label, unitRegex) {
 }
 
 function pickNearestLegendByValue(items, value, unitRegex) {
-  if (!Array.isArray(items) || !items.length || !Number.isFinite(value)) return null;
+  if (!Array.isArray(items) || !items.length || !Number.isFinite(value))
+    return null;
   let bestLabel = null;
   let bestDiff = Infinity;
   for (const item of items) {
@@ -1987,7 +1993,8 @@ function parseNumbersFromText(text) {
 }
 
 function pickNearestLegendByRgb(items, rgb) {
-  if (!Array.isArray(items) || !items.length || !Array.isArray(rgb)) return null;
+  if (!Array.isArray(items) || !items.length || !Array.isArray(rgb))
+    return null;
   const [r, g, b] = rgb;
   if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) {
     return null;
@@ -2159,7 +2166,8 @@ function parseNowcastFeatureInfoLabel(sourceKey, payloadText) {
 
   if (sourceKey === "bufr_phenomena") {
     for (const item of PHENOMENA_LEGEND) {
-      if (lc.includes(String(item.label || "").toLowerCase())) return item.label;
+      if (lc.includes(String(item.label || "").toLowerCase()))
+        return item.label;
     }
     const rgbFromCss = parseRgbCssTriplet(raw) || parseHexColorToRgb(raw);
     if (rgbFromCss) {
@@ -2205,7 +2213,12 @@ function parseNowcastFeatureInfoLabel(sourceKey, payloadText) {
 }
 
 async function fetchNowcastFeatureInfoLabel(sourceKey, frame, coord3857) {
-  if (!sourceKey || !frame || !Array.isArray(coord3857) || coord3857.length < 2) {
+  if (
+    !sourceKey ||
+    !frame ||
+    !Array.isArray(coord3857) ||
+    coord3857.length < 2
+  ) {
     logNowcastCrosshair("wms-skip-invalid-input", {
       sourceKey,
       hasFrame: Boolean(frame),
@@ -2468,7 +2481,10 @@ async function inspectPrecipAtCrosshairCenter() {
   try {
     const center3857 = map.getView()?.getCenter?.();
     if (!Array.isArray(center3857) || center3857.length < 2) {
-      logNowcastCrosshair("probe-skip-invalid-center", { probeToken, center3857 });
+      logNowcastCrosshair("probe-skip-invalid-center", {
+        probeToken,
+        center3857,
+      });
       return;
     }
     const px = await getFramePixels(frame.url);
@@ -2514,10 +2530,7 @@ async function inspectPrecipAtCrosshairCenter() {
 
     const xNorm = (coordX - west) / (east - west);
     const yNorm = (north - coordY) / (north - south);
-    const x = Math.min(
-      px.width - 1,
-      Math.max(0, Math.floor(xNorm * px.width)),
-    );
+    const x = Math.min(px.width - 1, Math.max(0, Math.floor(xNorm * px.width)));
     const y = Math.min(
       px.height - 1,
       Math.max(0, Math.floor(yNorm * px.height)),
@@ -2530,7 +2543,7 @@ async function inspectPrecipAtCrosshairCenter() {
         width: px.width,
         height: px.height,
       });
-      setPrecipInfo("В перекрестии: вне зоны радарного кадра");
+      setPrecipInfo("Вне зоны радарного кадра");
       return;
     }
 
@@ -2550,7 +2563,11 @@ async function inspectPrecipAtCrosshairCenter() {
         activeSource,
         reason: "nowcast-priority",
       });
-      label = await fetchNowcastFeatureInfoLabel(activeSource, frame, center3857);
+      label = await fetchNowcastFeatureInfoLabel(
+        activeSource,
+        frame,
+        center3857,
+      );
       if (probeToken !== centerProbeToken) {
         logNowcastCrosshair("probe-abort-token-mismatch-after-host", {
           probeToken,
@@ -2611,7 +2628,7 @@ async function inspectPrecipAtCrosshairCenter() {
         { probeToken, activeSource, rgb: [r, g, b], alpha },
         "warn",
       );
-      setPrecipInfo(`В перекрестии: неопределено (RGB ${r},${g},${b})`);
+      setPrecipInfo(`Неопределено`);
       return;
     }
     logNowcastCrosshair("probe-success", {
@@ -2620,7 +2637,7 @@ async function inspectPrecipAtCrosshairCenter() {
       label,
       labelSource,
     });
-    setPrecipInfo(`В перекрестии: ${label}`);
+    setPrecipInfo(`${label}`);
   } catch (e) {
     logNowcastCrosshair(
       "probe-error",
@@ -2632,7 +2649,7 @@ async function inspectPrecipAtCrosshairCenter() {
       "error",
     );
     if (probeToken === centerProbeToken) {
-      setPrecipInfo("В перекрестии: не удалось определить тип");
+      setPrecipInfo("Не удалось определить тип");
     }
   }
 }
