@@ -11,12 +11,10 @@ const SOURCE_SATELLITE = "__satellite__";
 const SATELLITE_MODE_LAYER_REQUEST = {
   hd_day: "European HRV RGB 0 degree",
   gray_dn: "msg_fes:ir108",
-  colorized: "msg_fes:ir108",
 };
 const SATELLITE_MODE_IMAGE_WIDTH = {
   hd_day: 4096,
   gray_dn: 3072,
-  colorized: 3072,
 };
 const SATELLITE_REFERENCE_TILE_URL =
   "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places_Alternate/MapServer/tile/{z}/{y}/{x}";
@@ -35,7 +33,6 @@ const NOWCAST_LAYER_ORDER = [
 const SATELLITE_LAYER_LABEL = "Спутник";
 const SATELLITE_STYLE_HD_DAY = "hd_day";
 const SATELLITE_STYLE_GRAY_DAY_NIGHT = "gray_dn";
-const SATELLITE_STYLE_COLORIZED = "colorized";
 const SATELLITE_WMTS_LAYER_CANDIDATES = [
   "GOES-East_ABI_Band13_Clean_Infrared",
   "GOES-West_ABI_Band13_Clean_Infrared",
@@ -50,8 +47,7 @@ const HD_LAYER_OPACITY = 179 / 255;
 const NOWCAST_LAYER_OPACITY = 1;
 const TRANSPARENT_PIXEL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
-// Резервный extent для кадров осадков (Европа/РФ), если API не вернёт geoBounds
-const DEFAULT_GEO_BOUNDS = [20, 40, 70, 66]; // [west, south, east, north] WGS84
+const DEFAULT_GEO_BOUNDS = [20, 40, 70, 66];
 
 const statusEl = document.getElementById("status");
 const timeLabelEl = document.getElementById("timeLabel");
@@ -69,6 +65,7 @@ const measureBtnEl = document.getElementById("measureBtn");
 const drawBtnEl = document.getElementById("drawBtn");
 const crosshairBtnEl = document.getElementById("crosshairBtn");
 const lightningToggleBtnEl = document.getElementById("lightningToggleBtn");
+const playBtnIconEl = document.getElementById("playBtnIcon");
 const playbackFrameCountEl = document.getElementById("playbackFrameCount");
 const sourceLayerSelectEl = document.getElementById("sourceLayerSelect");
 const mobileSourceLayerSelectEl = document.getElementById(
@@ -80,8 +77,14 @@ const mobileSatelliteStylePanelEl = document.getElementById(
 const mobileSatelliteColorModeEl = document.getElementById(
   "mobileSatelliteColorMode",
 );
+const mobileSatelliteColorizedToggleEl = document.getElementById(
+  "mobileSatelliteColorizedToggle",
+);
 const satelliteStylePanelEl = document.getElementById("satelliteStylePanel");
 const satelliteColorModeEl = document.getElementById("satelliteColorMode");
+const satelliteColorizedToggleEl = document.getElementById(
+  "satelliteColorizedToggle",
+);
 const legendPanelEl = document.getElementById("legendPanel");
 const legendToggleEl = document.getElementById("legendToggle");
 const legendTitleTextEl = document.getElementById("legendTitleText");
@@ -94,6 +97,7 @@ const mobileLegendRowsEl = document.getElementById("mobileLegendRows");
 const mapCrosshairEl = document.getElementById("mapCrosshair");
 const crosshairInfoEl = document.getElementById("crosshairInfo");
 const lightningPopupEl = document.getElementById("lightningPopup");
+const lightningPopupTextEl = document.getElementById("lightningPopupText");
 
 let map;
 let baseLayer;
@@ -274,7 +278,8 @@ const satelliteBlobUrlCache = new Map();
 const satelliteBlobUrlOrder = [];
 const satelliteTileStyleCache = new Map();
 const satelliteTileStyleOrder = [];
-let satelliteStyleMode = SATELLITE_STYLE_HD_DAY;
+let satelliteBaseMode = SATELLITE_STYLE_HD_DAY;
+let satelliteColorizedEnabled = false;
 
 function updateSatelliteStylePanelVisibility() {
   satelliteStylePanelEl?.classList.toggle(
@@ -288,39 +293,49 @@ function updateSatelliteStylePanelVisibility() {
 }
 
 function syncSatelliteModeControls() {
-  const mode = satelliteStyleMode || SATELLITE_STYLE_HD_DAY;
+  const mode = satelliteBaseMode || SATELLITE_STYLE_HD_DAY;
   if (satelliteColorModeEl) satelliteColorModeEl.value = mode;
   if (mobileSatelliteColorModeEl) mobileSatelliteColorModeEl.value = mode;
+  if (satelliteColorizedToggleEl)
+    satelliteColorizedToggleEl.checked = satelliteColorizedEnabled;
+  if (mobileSatelliteColorizedToggleEl)
+    mobileSatelliteColorizedToggleEl.checked = satelliteColorizedEnabled;
 }
 
-function normalizeSatelliteStyleMode(mode) {
+function normalizeSatelliteBaseMode(mode) {
   const value = String(mode || "").trim();
   if (value === SATELLITE_STYLE_GRAY_DAY_NIGHT)
     return SATELLITE_STYLE_GRAY_DAY_NIGHT;
-  if (value === SATELLITE_STYLE_COLORIZED) return SATELLITE_STYLE_COLORIZED;
   return SATELLITE_STYLE_HD_DAY;
 }
 
-async function applySatelliteMode(mode) {
-  const prevMode = satelliteStyleMode;
-  const nextMode = normalizeSatelliteStyleMode(mode);
-  if (nextMode === satelliteStyleMode) {
+async function applySatelliteStyleSettings(mode, colorizedEnabled) {
+  const prevMode = satelliteBaseMode;
+  const prevColorizedEnabled = satelliteColorizedEnabled;
+  const nextMode = normalizeSatelliteBaseMode(mode);
+  const nextColorizedEnabled = Boolean(colorizedEnabled);
+  if (
+    nextMode === satelliteBaseMode &&
+    nextColorizedEnabled === satelliteColorizedEnabled
+  ) {
     syncSatelliteModeControls();
     return;
   }
-  satelliteStyleMode = nextMode;
+  satelliteBaseMode = nextMode;
+  satelliteColorizedEnabled = nextColorizedEnabled;
   syncSatelliteModeControls();
   if (activeSource !== SOURCE_SATELLITE) return;
+  clearSatelliteStyleCaches();
   satelliteLayer?.setSource(null);
   setStatus("Применение спутникового режима...");
   try {
     await switchSource(SOURCE_SATELLITE);
   } catch (e) {
     console.warn("Satellite style switch failed:", e);
-    // Возвращаем предыдущий режим и пробуем восстановить поток кадров,
-    // чтобы не оставить сломанные blob-URL после неудачного переключения.
-    satelliteStyleMode = prevMode;
+    satelliteBaseMode = prevMode;
+    satelliteColorizedEnabled = prevColorizedEnabled;
     syncSatelliteModeControls();
+    clearSatelliteStyleCaches();
     try {
       await switchSource(SOURCE_SATELLITE);
     } catch (restoreErr) {
@@ -331,7 +346,7 @@ async function applySatelliteMode(mode) {
 }
 
 function getSatelliteStyleCacheKey(sourceUrl) {
-  return `${satelliteStyleMode}|${sourceUrl}`;
+  return `${satelliteBaseMode}|${satelliteColorizedEnabled ? "1" : "0"}|${sourceUrl}`;
 }
 
 function clearSatelliteStyleCaches() {
@@ -479,8 +494,6 @@ function lerpColor(c1, c2, t) {
 }
 
 function pseudoBtCByLuma(luma) {
-  // Для большинства IR-изображений в этой ленте: чем пиксель светлее,
-  // тем холоднее верхняя граница облака.
   const n = Math.pow(clamp01(luma / 255), 0.92);
   return 50 - n * 140;
 }
@@ -553,9 +566,6 @@ function meteologixLikeRgbByBt(bt) {
 }
 
 function estimateCloudTopHeightKmByBt(btC) {
-  // Более физичная и плавная оценка по стандартной атмосфере (ISA):
-  // тропосфера ~6.5 C/км до тропопаузы (~11 км, -56.5 C),
-  // выше — консервативное наращивание (ИК-температура не равна T воздуха 1:1).
   const bt = Number(btC);
   if (!Number.isFinite(bt)) return 0;
   if (bt >= 15) return 0;
@@ -563,13 +573,13 @@ function estimateCloudTopHeightKmByBt(btC) {
     return Math.max(0, (15 - bt) / 6.5);
   }
   if (bt >= -70) {
-    return 11 + ((-56.5 - bt) / 13.5) * 1.8; // 11..12.8 км
+    return 11 + ((-56.5 - bt) / 13.5) * 1.8;
   }
   if (bt >= -80) {
-    return 12.8 + ((-70 - bt) / 10) * 1.4; // 12.8..14.2 км
+    return 12.8 + ((-70 - bt) / 10) * 1.4;
   }
   if (bt >= -90) {
-    return 14.2 + ((-80 - bt) / 10) * 1.3; // 14.2..15.5 км
+    return 14.2 + ((-80 - bt) / 10) * 1.3;
   }
   return 15.5;
 }
@@ -610,10 +620,7 @@ function estimateBtBySatelliteColor(r, g, b) {
 }
 
 async function styleSatelliteTileCTA(blob) {
-  if (
-    satelliteStyleMode === SATELLITE_STYLE_HD_DAY ||
-    satelliteStyleMode === SATELLITE_STYLE_GRAY_DAY_NIGHT
-  ) {
+  if (!satelliteColorizedEnabled) {
     return blob;
   }
   const canvas = document.createElement("canvas");
@@ -648,19 +655,13 @@ async function styleSatelliteTileCTA(blob) {
     const b = data[i + 2];
     const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     const bt = pseudoBtCByLuma(luma);
-    const isColorizedMode = satelliteStyleMode === SATELLITE_STYLE_COLORIZED;
-    const [nr, ng, nb] = isColorizedMode
-      ? ctaLikeRgbByBt(bt)
-      : meteologixLikeRgbByBt(bt);
-    const coldNorm = Math.pow(
-      clamp01((-32 - bt) / 48),
-      isColorizedMode ? 0.9 : 0.82,
-    );
+    const [nr, ng, nb] = ctaLikeRgbByBt(bt);
+    const coldNorm = Math.pow(clamp01((-32 - bt) / 48), 0.9);
     data[i] = nr;
     data[i + 1] = ng;
     data[i + 2] = nb;
-    const alphaBase = isColorizedMode ? 0.72 : 0.75;
-    const alphaBoost = isColorizedMode ? 0.24 : 0.2;
+    const alphaBase = 0.72;
+    const alphaBoost = 0.24;
     data[i + 3] = Math.max(
       1,
       Math.round(a * (alphaBase + alphaBoost * coldNorm)),
@@ -811,7 +812,11 @@ function setPlaybackControlsEnabled(enabled) {
 }
 
 function updatePlayButton() {
-  playBtnEl.textContent = isPlaying ? "⏸" : "▶";
+  if (playBtnIconEl) {
+    playBtnIconEl.innerHTML = isPlaying
+      ? '<svg viewBox="0 0 24 24" focusable="false"><path d="M8 6h3v12H8zM13 6h3v12h-3z"></path></svg>'
+      : '<svg viewBox="0 0 24 24" focusable="false"><path d="M8 6v12l10-6z"></path></svg>';
+  }
   playBtnEl.classList.toggle("paused", !isPlaying);
 }
 
@@ -992,7 +997,6 @@ function createMap() {
       url: TRANSPARENT_PIXEL,
       projection: "EPSG:4326",
       imageExtent: geoBounds,
-      // Для радарной сетки используем nearest-neighbor, чтобы не замыливать пиксели.
       interpolate: false,
     }),
     opacity: HD_LAYER_OPACITY,
@@ -1022,8 +1026,6 @@ function createMap() {
     view: new ol.View({
       projection,
       enableRotation: false,
-      // Дискретные уровни масштаба: убираем дробный zoom, который
-      // визуально "смешивает" пиксельные блоки даже при nearest-render.
       constrainResolution: true,
       smoothResolutionConstraint: false,
       center: ol.proj.fromLonLat([
@@ -1033,7 +1035,6 @@ function createMap() {
       zoom: 4,
     }),
   });
-  // В глобальной сборке OL отключаем вращение через интеракции после создания map.
   map.getInteractions().forEach((interaction) => {
     if (
       interaction instanceof ol.interaction.PinchRotate ||
@@ -1109,8 +1110,6 @@ function createMap() {
     if (nowcastResolutionRerenderTimer) {
       clearTimeout(nowcastResolutionRerenderTimer);
     }
-    // Перерисовываем nowcast только после паузы в масштабировании,
-    // чтобы экранная сетка не "плавала" во время pinch-zoom.
     nowcastResolutionRerenderTimer = setTimeout(() => {
       nowcastResolutionRerenderTimer = null;
       renderFrame(currentFrame).catch((e) => {
@@ -1213,7 +1212,6 @@ function createMap() {
       );
       return;
     }
-    // Новый замер третьим кликом
     measureStart = event.coordinate.slice();
     measureEnd = null;
     measurePointer = event.coordinate.slice();
@@ -1274,8 +1272,6 @@ function renderNowcastPixelGapOverlay(event) {
   const spanYLen = Math.hypot(spanY[0], spanY[1]);
   if (!(spanXLen > 0 && spanYLen > 0)) return;
 
-  // ImageStatic работает в модели "край-край":
-  // extent задает границы изображения, поэтому шаг по сетке = span/width(height).
   const stepXLen = spanXLen / Math.max(1, width);
   const stepYLen = spanYLen / Math.max(1, height);
   const minStepCss = Math.min(stepXLen, stepYLen);
@@ -1452,7 +1448,11 @@ function showLightningPopup(coordinate, strikeTime, ageMinutes) {
   const ageText = Number.isFinite(ageMinutes)
     ? ` (${Math.round(ageMinutes)} мин назад)`
     : "";
-  lightningPopupEl.textContent = `⚡ ${localText}${ageText}`;
+  if (lightningPopupTextEl) {
+    lightningPopupTextEl.textContent = `${localText}${ageText}`;
+  } else {
+    lightningPopupEl.textContent = `${localText}${ageText}`;
+  }
   lightningPopupEl.classList.remove("hidden");
   lightningPopupOverlay.setPosition(coordinate);
 }
@@ -1583,7 +1583,6 @@ async function refreshLightningOverlay() {
       renderLightningStrikes(first);
       return;
     }
-    // Fallback: if local bbox has no strikes, fetch wider area.
     const respWide = await fetch(
       `/api/lightning/gld360/latest?${params.toString()}`,
       {
@@ -1617,7 +1616,6 @@ function setFrameExtentAndUrl(extent, url, projection, interpolate = false) {
       url: url || TRANSPARENT_PIXEL,
       projection: projection || "EPSG:4326",
       imageExtent: extent,
-      // Для спутника включаем сглаживание, для радарной сетки оставляем пиксельный nearest.
       interpolate,
     }),
   );
@@ -1661,7 +1659,6 @@ function classifyDbzGreenCluster(r, g, b, items) {
 
   const low = nearest(lowBand);
   const high = nearest(highBand);
-  // Для зелёного кластера в nowcast 0/5 dBZ заметно светлее, чем 50/55 dBZ.
   const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
   if (Math.abs(low.distSq - high.distSq) <= 26 * 26) {
     return luma >= 186 ? low.item.label : high.item.label;
@@ -1705,8 +1702,6 @@ function classifyHeightGreenCluster(r, g, b, items) {
   };
   const low = nearest(lowBand);
   const high = nearest(highBand);
-  // Для высоты ВГО: у 1-3 км синий канал заметно ближе к зеленому,
-  // у 12-13 км — выраженно "зеленее" (G >> B).
   const greenBlueGap = g - b;
   if (Math.abs(low.distSq - high.distSq) <= 24 * 24) {
     return greenBlueGap > 45 ? high.item.label : low.item.label;
@@ -1719,8 +1714,6 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
   const items = cfg?.items || [];
   if (!items.length) return null;
 
-  // Для nowcast-слоёв используем только "чистое" сопоставление RGB с легендой.
-  // Здесь цвета должны совпадать 1-в-1, без эвристик и соседних пикселей.
   if (sourceKey !== SOURCE_HD && sourceKey !== SOURCE_SATELLITE) {
     if (alpha === 0) return items[0].label;
     for (const p of items) {
@@ -1754,7 +1747,6 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
       const is3v13 =
         (bestVal === 3 && secondVal === 13) || (bestVal === 13 && secondVal === 3);
       if (is3v13) {
-        // 3 км заметно "синее", 13 км заметно "зеленее".
         return b >= 102 ? "3.00 км" : "13.00 км";
       }
       const isHeightAmbiguous = (v) =>
@@ -1828,7 +1820,6 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
   if (bestDist <= (cfg?.maxDist || PHENOMENA_MATCH_MAX_DIST)) return best.label;
   if (cfg?.forceNearest) return best.label;
 
-  // Для "Опасных явлений HD" оставляем мягкий fallback на синие ливневые тона.
   if (sourceKey === SOURCE_HD) {
     const looksBlueShower = b > g && b > r && r < 130;
     if (looksBlueShower) {
@@ -1851,8 +1842,6 @@ function getLegendLabelByRgb(sourceKey, r, g, b, alpha = 255) {
         return showerBest.label;
       }
     }
-    // Если точного совпадения нет, используем ближайший класс, но
-    // не подставляем "Смерч" как fallback (слишком редкий и тёмный класс).
     const tornado = PHENOMENA_LEGEND[PHENOMENA_LEGEND.length - 1]?.label;
     if (best.label === tornado && second?.label && second.label !== tornado) {
       return second.label;
@@ -2080,19 +2069,16 @@ function decodeNowcastByteValueToLabel(sourceKey, byteValue) {
   if (!Number.isFinite(byteValue)) return null;
   const v = Math.round(byteValue);
   if (sourceKey === "bufr_height") {
-    // Формула from nowcast demo: km = (value - 2) / 10.
     if (v <= 1) return null;
     const km = (v - 2) / 10;
     return pickNearestLegendByValue(HEIGHT_LEGEND, km, /км/i);
   }
   if (sourceKey === "bufr_dbz1") {
-    // Формула from nowcast demo: dBZ = -31.5 + (value-1)*127/254.
     if (v <= 1) return null;
     const dbz = -31.5 + ((v - 1) * (31.5 + 95.5)) / 254;
     return pickNearestLegendByValue(DBZ_LEGEND, dbz, /dbz/i);
   }
   if (sourceKey === "bufr_precip") {
-    // Формула from nowcast demo (Z-R): value(byte) -> dBZ -> mm/h.
     if (v <= 1) return null;
     const lgz = (-31.5 + ((v - 1) * (31.5 + 95.5)) / 254) * 0.1;
     const mmh = Math.pow(10, (lgz - Math.log10(200)) / 1.6);
@@ -2437,7 +2423,6 @@ function setDrawMode(enabled) {
   if (!drawMode && drawLayer?.getSource()) {
     drawLayer.getSource().clear();
   }
-  // В режиме рисования отключаем перетаскивание карты, чтобы двигался курсор, а не карта
   if (map) {
     map.getInteractions().forEach(function (interaction) {
       if (interaction instanceof ol.interaction.DragPan) {
@@ -2454,8 +2439,6 @@ function syncMapViewportAfterResize() {
   if (viewportSyncTimer) {
     clearTimeout(viewportSyncTimer);
   }
-  // На мобильных после поворота размер viewport меняется каскадно:
-  // делаем отложенную синхронизацию, чтобы слои и пиксельная сетка не смещались.
   viewportSyncTimer = setTimeout(() => {
     viewportSyncTimer = null;
     if (nowcastResolutionRerenderTimer) {
@@ -2584,7 +2567,7 @@ async function loadNowcastFrames(layerName) {
 }
 
 async function loadSatelliteFrames() {
-  const cacheMode = satelliteStyleMode;
+  const cacheMode = satelliteBaseMode;
   const requestedLayer =
     SATELLITE_MODE_LAYER_REQUEST[cacheMode] ||
     SATELLITE_MODE_LAYER_REQUEST[SATELLITE_STYLE_HD_DAY];
@@ -2693,7 +2676,6 @@ async function getNowcastBlobUrlCached(sourceUrl) {
   nowcastBlobUrlCache.set(sourceUrl, localUrl);
   nowcastBlobUrlOrder.push(sourceUrl);
 
-  // Ограничиваем память: удаляем самые старые blob-URL.
   const hardLimit = 220;
   while (nowcastBlobUrlOrder.length > hardLimit) {
     const key = nowcastBlobUrlOrder.shift();
@@ -2798,12 +2780,10 @@ async function removeNowcastRadarBackground(blob) {
       continue;
     }
 
-    // Чуть уменьшаем общую прозрачность nowcast-цветов.
     data[i + 3] = Math.max(1, Math.round(a * NOWCAST_COLOR_ALPHA));
   }
 
   if (NOWCAST_EDGE_CUT_STYLE) {
-    // Аккуратный "разрез": подчеркиваем только реальные границы блоков/контраста.
     const src = new Uint8ClampedArray(data);
     const hasEdgeNeighbor = (x, y, r, g, b) => {
       const neighbors = [
@@ -3112,7 +3092,6 @@ function bindControls() {
     setLightningOverlayEnabled(!lightningOverlayEnabled);
   };
   lightningToggleBtnEl?.addEventListener("click", onLightningToggle);
-  lightningToggleBtnEl?.addEventListener("pointerup", onLightningToggle);
   legendToggleEl?.addEventListener("click", () => {
     legendPanelEl?.classList.toggle("legend-collapsed");
   });
@@ -3184,13 +3163,25 @@ function bindControls() {
     const nextMode = String(
       satelliteColorModeEl.value || SATELLITE_STYLE_HD_DAY,
     );
-    await applySatelliteMode(nextMode);
+    await applySatelliteStyleSettings(nextMode, satelliteColorizedEnabled);
   });
   mobileSatelliteColorModeEl?.addEventListener("change", async () => {
     const nextMode = String(
       mobileSatelliteColorModeEl.value || SATELLITE_STYLE_HD_DAY,
     );
-    await applySatelliteMode(nextMode);
+    await applySatelliteStyleSettings(nextMode, satelliteColorizedEnabled);
+  });
+  satelliteColorizedToggleEl?.addEventListener("change", async () => {
+    await applySatelliteStyleSettings(
+      satelliteBaseMode,
+      satelliteColorizedToggleEl.checked,
+    );
+  });
+  mobileSatelliteColorizedToggleEl?.addEventListener("change", async () => {
+    await applySatelliteStyleSettings(
+      satelliteBaseMode,
+      mobileSatelliteColorizedToggleEl.checked,
+    );
   });
 }
 
@@ -3233,8 +3224,6 @@ async function refreshData() {
         : NaN;
     await loadData();
     if (activeSource !== SOURCE_HD) {
-      // Не очищаем кэш слоёв при активном non-HD режиме, чтобы повторное
-      // переключение было мгновенным. Актуализация идёт периодическим прогревом сервера.
       updateLightningVisibilityForFrame(false);
     }
     upsertRadarLayer();
@@ -3243,7 +3232,6 @@ async function refreshData() {
     timelineEl.max = String(Math.max(0, frames.length - 1));
     if (!frames.length) return;
 
-    // Пытаемся сохранить текущий кадр по времени, чтобы не прыгал таймлайн.
     if (Number.isFinite(prevTime)) {
       let nearestIdx = 0;
       let nearestDiff = Infinity;
