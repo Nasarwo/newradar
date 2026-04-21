@@ -260,6 +260,10 @@ const NOWCAST_RADAR_BG_RGB = [0xd3, 0xd8, 0xd8];
 const NOWCAST_RADAR_BG_TOLERANCE = 20;
 const NOWCAST_GRAY_BG_RGB = [202, 202, 202];
 const NOWCAST_GRAY_BG_TOLERANCE = 34;
+const NOWCAST_SOURCE_BG_RULES = {
+  bufr_precip: [{ rgb: [0xb5, 0xb3, 0xb4], tolerance: 10 }],
+  bufr_dbz1: [{ rgb: [0xd7, 0xfb, 0xb4], tolerance: 12 }],
+};
 const NOWCAST_COLOR_ALPHA = 0.86;
 const NOWCAST_EDGE_CUT_STYLE = false;
 const NOWCAST_EDGE_CUT_ALPHA = 0.8;
@@ -2871,10 +2875,12 @@ function warmNowcastFramesInBackground(layer, framesList) {
   (async () => {
     for (let i = 0; i < target.length; i++) {
       const frame = target[i];
-      if (!frame?.sourceUrl || nowcastBlobUrlCache.has(frame.sourceUrl))
+      const sourceUrl = frame?.sourceUrl;
+      const cacheKey = `${String(layer || "").trim()}|${sourceUrl}`;
+      if (!sourceUrl || nowcastBlobUrlCache.has(cacheKey))
         continue;
       try {
-        const localUrl = await getNowcastBlobUrlCached(frame.sourceUrl);
+        const localUrl = await getNowcastBlobUrlCached(sourceUrl, layer);
         frame.url = localUrl;
       } catch (e) {
         console.warn(`Nowcast warmup failed (${layer} #${i + 1}):`, e);
@@ -2900,19 +2906,20 @@ function warmSatelliteFramesInBackground(cacheKey, framesList) {
   })();
 }
 
-async function getNowcastBlobUrlCached(sourceUrl) {
-  if (nowcastBlobUrlCache.has(sourceUrl)) {
-    return nowcastBlobUrlCache.get(sourceUrl);
+async function getNowcastBlobUrlCached(sourceUrl, sourceKey = "") {
+  const cacheKey = `${String(sourceKey || "").trim()}|${sourceUrl}`;
+  if (nowcastBlobUrlCache.has(cacheKey)) {
+    return nowcastBlobUrlCache.get(cacheKey);
   }
   const response = await fetch(sourceUrl, { cache: "force-cache" });
   if (!response.ok) {
     throw new Error(`Frame HTTP ${response.status}`);
   }
   const blob = await response.blob();
-  const cleanedBlob = await removeNowcastRadarBackground(blob);
+  const cleanedBlob = await removeNowcastRadarBackground(blob, sourceKey);
   const localUrl = URL.createObjectURL(cleanedBlob);
-  nowcastBlobUrlCache.set(sourceUrl, localUrl);
-  nowcastBlobUrlOrder.push(sourceUrl);
+  nowcastBlobUrlCache.set(cacheKey, localUrl);
+  nowcastBlobUrlOrder.push(cacheKey);
 
   const hardLimit = 220;
   while (nowcastBlobUrlOrder.length > hardLimit) {
@@ -2955,7 +2962,7 @@ async function getSatelliteBlobUrlCached(sourceUrl) {
   return localUrl;
 }
 
-async function removeNowcastRadarBackground(blob) {
+async function removeNowcastRadarBackground(blob, sourceKey = "") {
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (typeof createImageBitmap === "function") {
@@ -2986,6 +2993,8 @@ async function removeNowcastRadarBackground(blob) {
   const maxDistSq = NOWCAST_RADAR_BG_TOLERANCE * NOWCAST_RADAR_BG_TOLERANCE;
   const [gr, gg, gb] = NOWCAST_GRAY_BG_RGB;
   const maxGrayDistSq = NOWCAST_GRAY_BG_TOLERANCE * NOWCAST_GRAY_BG_TOLERANCE;
+  const sourceBgRules =
+    NOWCAST_SOURCE_BG_RULES[String(sourceKey || "").trim()] || [];
 
   for (let i = 0; i < data.length; i += 4) {
     const a = data[i + 3];
@@ -3012,8 +3021,22 @@ async function removeNowcastRadarBackground(blob) {
       isNeutralGray &&
       avg >= 145 &&
       (grayDistSq <= maxGrayDistSq || distSq <= maxDistSq);
+    let isSourceSpecificBg = false;
+    for (const rule of sourceBgRules) {
+      const [rr, rg, rb] = rule.rgb;
+      const tolerance = Number(rule.tolerance || 0);
+      const maxRuleDistSq = tolerance * tolerance;
+      const drr = r - rr;
+      const drg = g - rg;
+      const drb = b - rb;
+      const ruleDistSq = drr * drr + drg * drg + drb * drb;
+      if (ruleDistSq <= maxRuleDistSq) {
+        isSourceSpecificBg = true;
+        break;
+      }
+    }
 
-    if (distSq <= maxDistSq || isLikelyTileBg) {
+    if (distSq <= maxDistSq || isLikelyTileBg || isSourceSpecificBg) {
       data[i + 3] = 0;
       continue;
     }
@@ -3203,6 +3226,7 @@ async function renderFrame(index) {
       try {
         const cleanedNowcastUrl = await getNowcastBlobUrlCached(
           frame.sourceUrl,
+          activeSource,
         );
         if (cleanedNowcastUrl) {
           frame.url = cleanedNowcastUrl;
