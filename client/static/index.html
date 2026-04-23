@@ -5,7 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MetloRad (BETA)</title>
     <link rel="icon" type="image/x-icon" href="/favicon.ico?v=20260417" />
-    <link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=20260417" />
+    <link
+      rel="shortcut icon"
+      type="image/x-icon"
+      href="/favicon.ico?v=20260417"
+    />
     <link rel="apple-touch-icon" href="/favicon.ico?v=20260417" />
     <link
       rel="stylesheet"
@@ -67,17 +71,30 @@
         <label class="mobile-satellite-row" for="mobileSatelliteColorMode">
           <span>Отображение:</span>
           <select id="mobileSatelliteColorMode" class="mobile-source-select">
-            <option value="hd_day" selected>Спутник HD (только день)</option>
-            <option value="gray_dn">Спутник (день/ночь)</option>
+            <option value="hd_day" selected>
+              True Colour RGB - MTG - 0 degree
+            </option>
+            <option value="gray_dn">
+              FCI HRFI IR10.5 μm Image - MTG - 0 degree
+            </option>
           </select>
         </label>
-        <label class="mobile-satellite-row mobile-satellite-check">
+        <label
+          class="mobile-satellite-row mobile-satellite-check"
+          id="mobileSatelliteColorizedRow"
+        >
           <input type="checkbox" id="mobileSatelliteColorizedToggle" />
           <span>Цветной</span>
         </label>
+        <label class="mobile-satellite-row mobile-satellite-check">
+          <input type="checkbox" id="mobileSatelliteRdtToggle" />
+          <span>Быстро развивающиеся грозы</span>
+        </label>
       </div>
       <div class="mobile-menu-section" id="mobileLegendPanel">
-        <div class="mobile-section-title" id="mobileLegendTitleText">Легенда</div>
+        <div class="mobile-section-title" id="mobileLegendTitleText">
+          Легенда
+        </div>
         <div class="mobile-legend-wrap">
           <table>
             <tbody id="mobileLegendRows"></tbody>
@@ -112,13 +129,20 @@
       <label class="toggle-row" for="satelliteColorMode">
         <span>Отображение:</span>
         <select id="satelliteColorMode" title="Режим спутникового слоя">
-          <option value="hd_day" selected>Спутник HD (только день)</option>
-          <option value="gray_dn">Спутник (день/ночь)</option>
+          <option value="hd_day" selected>Спутник HD (День)</option>
+          <option value="gray_dn">Спутник (День/Ночь)</option>
         </select>
       </label>
-      <label class="toggle-row satellite-colorized-toggle">
+      <label
+        class="toggle-row satellite-colorized-toggle"
+        id="satelliteColorizedRow"
+      >
         <input type="checkbox" id="satelliteColorizedToggle" />
         <span>Цветной</span>
+      </label>
+      <label class="toggle-row satellite-colorized-toggle">
+        <input type="checkbox" id="satelliteRdtToggle" />
+        <span>Rapidly Developing Thunderstorms</span>
       </label>
     </div>
 
@@ -257,6 +281,6 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/ol@10.6.1/dist/ol.js"></script>
-    <script src="/static/app.js?v=20260417_16"></script>
+    <script src="/static/app.js?v=20260418_07"></script>
   </body>
 </html>

@@ -9,13 +9,16 @@ const SATELLITE_CADENCE_MIN = 10;
 const SOURCE_HD = "__hd__";
 const SOURCE_SATELLITE = "__satellite__";
 const SATELLITE_MODE_LAYER_REQUEST = {
-  hd_day: "European HRV RGB 0 degree",
-  gray_dn: "msg_fes:ir108",
+  hd_day: "mtg_fd:rgb_truecolour",
+  gray_dn: "mtg_fd:ir105_hrfi",
 };
+const SATELLITE_MTG_IR105_CLOUD_TOPS_STYLE = "mtg_fd_ir105_hrfi_style_02";
+const SATELLITE_RDT_LAYER_REQUEST = "Rapidly Developing Thunderstorms";
 const SATELLITE_MODE_IMAGE_WIDTH = {
   hd_day: 4096,
   gray_dn: 3072,
 };
+const SATELLITE_RDT_MATCH_WINDOW_MS = 30 * 60 * 1000;
 const SATELLITE_REFERENCE_TILE_URL =
   "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places_Alternate/MapServer/tile/{z}/{y}/{x}";
 const NOWCAST_LAYER_LABELS = {
@@ -80,11 +83,19 @@ const mobileSatelliteColorModeEl = document.getElementById(
 const mobileSatelliteColorizedToggleEl = document.getElementById(
   "mobileSatelliteColorizedToggle",
 );
+const mobileSatelliteColorizedRowEl = document.getElementById(
+  "mobileSatelliteColorizedRow",
+);
+const mobileSatelliteRdtToggleEl = document.getElementById(
+  "mobileSatelliteRdtToggle",
+);
 const satelliteStylePanelEl = document.getElementById("satelliteStylePanel");
 const satelliteColorModeEl = document.getElementById("satelliteColorMode");
+const satelliteColorizedRowEl = document.getElementById("satelliteColorizedRow");
 const satelliteColorizedToggleEl = document.getElementById(
   "satelliteColorizedToggle",
 );
+const satelliteRdtToggleEl = document.getElementById("satelliteRdtToggle");
 const legendPanelEl = document.getElementById("legendPanel");
 const legendToggleEl = document.getElementById("legendToggle");
 const legendTitleTextEl = document.getElementById("legendTitleText");
@@ -103,6 +114,7 @@ let map;
 let baseLayer;
 let frameLayer;
 let satelliteLayer;
+let satelliteRdtLayer;
 let radarLayer;
 let satelliteReferenceLayer;
 let measureLayer;
@@ -117,6 +129,7 @@ let radarImageSize = [0, 0];
 let nowcastMeta = null;
 const nowcastFramesByLayer = new Map();
 const satelliteFramesByKey = new Map();
+const satelliteRdtFramesByKey = new Map();
 let geoBounds = DEFAULT_GEO_BOUNDS.slice();
 let geoBounds3857 = null;
 let radars = [];
@@ -285,6 +298,8 @@ const satelliteTileStyleCache = new Map();
 const satelliteTileStyleOrder = [];
 let satelliteBaseMode = SATELLITE_STYLE_HD_DAY;
 let satelliteColorizedEnabled = false;
+let satelliteRdtEnabled = false;
+let satelliteRdtFrames = [];
 
 function logNowcastCrosshair(event, details = undefined, level = "log") {
   if (!NOWCAST_CROSSHAIR_DEBUG) return;
@@ -314,12 +329,23 @@ function updateSatelliteStylePanelVisibility() {
 
 function syncSatelliteModeControls() {
   const mode = satelliteBaseMode || SATELLITE_STYLE_HD_DAY;
+  const colorizedSupported = isSatelliteColorizedToggleSupported(mode);
+  const effectiveColorized = getEffectiveSatelliteColorizedEnabled(
+    mode,
+    satelliteColorizedEnabled,
+  );
+  if (satelliteColorizedRowEl)
+    satelliteColorizedRowEl.classList.toggle("hidden", !colorizedSupported);
+  if (mobileSatelliteColorizedRowEl)
+    mobileSatelliteColorizedRowEl.classList.toggle("hidden", !colorizedSupported);
   if (satelliteColorModeEl) satelliteColorModeEl.value = mode;
   if (mobileSatelliteColorModeEl) mobileSatelliteColorModeEl.value = mode;
-  if (satelliteColorizedToggleEl)
-    satelliteColorizedToggleEl.checked = satelliteColorizedEnabled;
+  if (satelliteColorizedToggleEl) satelliteColorizedToggleEl.checked = effectiveColorized;
   if (mobileSatelliteColorizedToggleEl)
-    mobileSatelliteColorizedToggleEl.checked = satelliteColorizedEnabled;
+    mobileSatelliteColorizedToggleEl.checked = effectiveColorized;
+  if (satelliteRdtToggleEl) satelliteRdtToggleEl.checked = satelliteRdtEnabled;
+  if (mobileSatelliteRdtToggleEl)
+    mobileSatelliteRdtToggleEl.checked = satelliteRdtEnabled;
 }
 
 function normalizeSatelliteBaseMode(mode) {
@@ -329,11 +355,42 @@ function normalizeSatelliteBaseMode(mode) {
   return SATELLITE_STYLE_HD_DAY;
 }
 
+function isSatelliteColorizedToggleSupported(mode) {
+  return normalizeSatelliteBaseMode(mode) === SATELLITE_STYLE_GRAY_DAY_NIGHT;
+}
+
+function getEffectiveSatelliteColorizedEnabled(mode, colorizedEnabled) {
+  if (!isSatelliteColorizedToggleSupported(mode)) return false;
+  return Boolean(colorizedEnabled);
+}
+
+function getSatelliteRequestedLayer(mode) {
+  const key = normalizeSatelliteBaseMode(mode);
+  return (
+    SATELLITE_MODE_LAYER_REQUEST[key] ||
+    SATELLITE_MODE_LAYER_REQUEST[SATELLITE_STYLE_HD_DAY]
+  );
+}
+
+function getSatelliteRequestedStyle(mode, colorizedEnabled) {
+  const key = normalizeSatelliteBaseMode(mode);
+  if (key !== SATELLITE_STYLE_GRAY_DAY_NIGHT) return "";
+  return colorizedEnabled ? SATELLITE_MTG_IR105_CLOUD_TOPS_STYLE : "";
+}
+
+function shouldUseSatelliteClientColorizer(mode) {
+  const key = normalizeSatelliteBaseMode(mode);
+  return key !== SATELLITE_STYLE_GRAY_DAY_NIGHT;
+}
+
 async function applySatelliteStyleSettings(mode, colorizedEnabled) {
   const prevMode = satelliteBaseMode;
   const prevColorizedEnabled = satelliteColorizedEnabled;
   const nextMode = normalizeSatelliteBaseMode(mode);
-  const nextColorizedEnabled = Boolean(colorizedEnabled);
+  const nextColorizedEnabled = getEffectiveSatelliteColorizedEnabled(
+    nextMode,
+    colorizedEnabled,
+  );
   if (
     nextMode === satelliteBaseMode &&
     nextColorizedEnabled === satelliteColorizedEnabled
@@ -365,7 +422,8 @@ async function applySatelliteStyleSettings(mode, colorizedEnabled) {
   }
 }
 
-function getSatelliteStyleCacheKey(sourceUrl) {
+function getSatelliteStyleCacheKey(sourceUrl, useStyle = true) {
+  if (!useStyle) return `raw|${sourceUrl}`;
   return `${satelliteBaseMode}|${satelliteColorizedEnabled ? "1" : "0"}|${sourceUrl}`;
 }
 
@@ -383,6 +441,69 @@ function clearSatelliteStyleCaches() {
   satelliteTileStyleOrder.length = 0;
   satelliteSourceCache.clear();
   satelliteFramesByKey.clear();
+  satelliteRdtFramesByKey.clear();
+}
+
+function getFrameTimestampMs(frame) {
+  const t = frame?.timestamp;
+  if (t instanceof Date) return t.getTime();
+  const ms = new Date(t || 0).getTime();
+  return Number.isFinite(ms) ? ms : NaN;
+}
+
+function findNearestFrameByTimestamp(targetFrame, candidates, maxDeltaMs) {
+  if (!targetFrame || !Array.isArray(candidates) || !candidates.length) return null;
+  const targetMs = getFrameTimestampMs(targetFrame);
+  if (!Number.isFinite(targetMs)) return null;
+  let best = null;
+  let bestDelta = Infinity;
+  for (const frame of candidates) {
+    const ms = getFrameTimestampMs(frame);
+    if (!Number.isFinite(ms)) continue;
+    const delta = Math.abs(ms - targetMs);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      best = frame;
+    }
+  }
+  if (!best || bestDelta > maxDeltaMs) return null;
+  return best;
+}
+
+async function applySatelliteRdtSettings(enabled) {
+  const prevEnabled = satelliteRdtEnabled;
+  const nextEnabled = Boolean(enabled);
+  if (nextEnabled === satelliteRdtEnabled) {
+    syncSatelliteModeControls();
+    return;
+  }
+  satelliteRdtEnabled = nextEnabled;
+  syncSatelliteModeControls();
+  if (!nextEnabled) {
+    satelliteRdtFrames = [];
+    satelliteRdtLayer?.setVisible(false);
+    if (activeSource === SOURCE_SATELLITE) {
+      renderFrame(currentFrame).catch((e) => {
+        console.warn("Satellite RDT disable rerender failed:", e);
+      });
+    }
+    return;
+  }
+  if (activeSource !== SOURCE_SATELLITE) return;
+  setStatus("Применение слоя RDT...");
+  try {
+    await switchSource(SOURCE_SATELLITE);
+  } catch (e) {
+    console.warn("Satellite RDT switch failed:", e);
+    satelliteRdtEnabled = prevEnabled;
+    syncSatelliteModeControls();
+    try {
+      await switchSource(SOURCE_SATELLITE);
+    } catch (restoreErr) {
+      console.warn("Satellite RDT restore failed:", restoreErr);
+    }
+    setStatus(`Ошибка переключения слоя RDT: ${e.message}`);
+  }
 }
 
 function getNearestLegendColorInfo(r, g, b) {
@@ -1022,6 +1143,17 @@ function createMap() {
     opacity: HD_LAYER_OPACITY,
     zIndex: 5,
   });
+  satelliteRdtLayer = new ol.layer.Image({
+    source: new ol.source.ImageStatic({
+      url: TRANSPARENT_PIXEL,
+      projection: "EPSG:4326",
+      imageExtent: geoBounds,
+      interpolate: true,
+    }),
+    opacity: 0.92,
+    visible: false,
+    zIndex: 6,
+  });
   satelliteLayer = new ol.layer.Tile({
     source: null,
     opacity: 1,
@@ -1037,12 +1169,18 @@ function createMap() {
     }),
     opacity: 0.95,
     visible: false,
-    zIndex: 6,
+    zIndex: 7,
   });
 
   map = new ol.Map({
     target: "map",
-    layers: [baseLayer, satelliteLayer, frameLayer, satelliteReferenceLayer],
+    layers: [
+      baseLayer,
+      satelliteLayer,
+      frameLayer,
+      satelliteRdtLayer,
+      satelliteReferenceLayer,
+    ],
     view: new ol.View({
       projection,
       enableRotation: false,
@@ -1634,7 +1772,33 @@ function setLightningOverlayEnabled(enabled) {
 }
 
 function setFrameExtentAndUrl(extent, url, projection, interpolate = false) {
-  frameLayer.setSource(
+  setImageLayerExtentAndUrl(frameLayer, extent, url, projection, interpolate);
+}
+
+function setSatelliteRdtExtentAndUrl(
+  extent,
+  url,
+  projection,
+  interpolate = true,
+) {
+  setImageLayerExtentAndUrl(
+    satelliteRdtLayer,
+    extent,
+    url,
+    projection,
+    interpolate,
+  );
+}
+
+function setImageLayerExtentAndUrl(
+  layer,
+  extent,
+  url,
+  projection,
+  interpolate = false,
+) {
+  if (!layer) return;
+  layer.setSource(
     new ol.source.ImageStatic({
       url: url || TRANSPARENT_PIXEL,
       projection: projection || "EPSG:4326",
@@ -2810,9 +2974,12 @@ async function loadNowcastFrames(layerName) {
 
 async function loadSatelliteFrames() {
   const cacheMode = satelliteBaseMode;
-  const requestedLayer =
-    SATELLITE_MODE_LAYER_REQUEST[cacheMode] ||
-    SATELLITE_MODE_LAYER_REQUEST[SATELLITE_STYLE_HD_DAY];
+  const requestedLayer = getSatelliteRequestedLayer(cacheMode);
+  const requestedStyle = getSatelliteRequestedStyle(
+    cacheMode,
+    satelliteColorizedEnabled,
+  );
+  const useClientStyle = shouldUseSatelliteClientColorizer(cacheMode);
   const widthHint =
     SATELLITE_MODE_IMAGE_WIDTH[cacheMode] ||
     SATELLITE_MODE_IMAGE_WIDTH[SATELLITE_STYLE_GRAY_DAY_NIGHT];
@@ -2824,7 +2991,7 @@ async function loadSatelliteFrames() {
         Math.max(0.001, Math.abs(east - west)),
     ),
   );
-  const framesCacheKey = `${requestedLayer}|${SATELLITE_FRAME_LIMIT}|${SATELLITE_CADENCE_MIN}|${cacheMode}|${widthHint}x${heightHint}`;
+  const framesCacheKey = `${requestedLayer}|${requestedStyle}|${SATELLITE_FRAME_LIMIT}|${SATELLITE_CADENCE_MIN}|${cacheMode}|${widthHint}x${heightHint}|${useClientStyle ? "client-style" : "raw"}`;
   if (satelliteFramesByKey.has(framesCacheKey)) {
     return satelliteFramesByKey.get(framesCacheKey);
   }
@@ -2839,6 +3006,7 @@ async function loadSatelliteFrames() {
     width: String(widthHint),
     height: String(heightHint),
   });
+  if (requestedStyle) params.set("style", requestedStyle);
   setStatus("Загрузка спутниковых кадров...");
   const response = await fetch(`/api/satellite/frames?${params.toString()}`, {
     cache: "no-store",
@@ -2865,7 +3033,63 @@ async function loadSatelliteFrames() {
     )
     .sort((a, b) => a.timestamp - b.timestamp);
   satelliteFramesByKey.set(framesCacheKey, normalizedRaw);
-  warmSatelliteFramesInBackground(framesCacheKey, normalizedRaw);
+  warmSatelliteFramesInBackground(framesCacheKey, normalizedRaw, useClientStyle);
+  return normalizedRaw;
+}
+
+async function loadSatelliteRdtFrames() {
+  const [west, south, east, north] = geoBounds;
+  const cacheMode = satelliteBaseMode;
+  const widthHint =
+    SATELLITE_MODE_IMAGE_WIDTH[cacheMode] ||
+    SATELLITE_MODE_IMAGE_WIDTH[SATELLITE_STYLE_GRAY_DAY_NIGHT];
+  const heightHint = Math.max(
+    512,
+    Math.round(
+      (widthHint * Math.abs(north - south)) /
+        Math.max(0.001, Math.abs(east - west)),
+    ),
+  );
+  const framesCacheKey = `rdt|${SATELLITE_RDT_LAYER_REQUEST}|${SATELLITE_FRAME_LIMIT}|${SATELLITE_CADENCE_MIN}|${widthHint}x${heightHint}`;
+  if (satelliteRdtFramesByKey.has(framesCacheKey)) {
+    return satelliteRdtFramesByKey.get(framesCacheKey);
+  }
+  const params = new URLSearchParams({
+    layer: SATELLITE_RDT_LAYER_REQUEST,
+    limit: String(SATELLITE_FRAME_LIMIT),
+    cadenceMin: String(SATELLITE_CADENCE_MIN),
+    west: String(west),
+    south: String(south),
+    east: String(east),
+    north: String(north),
+    width: String(widthHint),
+    height: String(heightHint),
+  });
+  const response = await fetch(`/api/satellite/frames?${params.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`Satellite RDT frames HTTP ${response.status}`);
+  }
+  const payload = await response.json();
+  const sourceFrames = Array.isArray(payload?.frames) ? payload.frames : [];
+  const normalizedRaw = sourceFrames
+    .map((f) => ({
+      url: f.url || "",
+      sourceUrl: f.url || "",
+      timestamp: new Date(f.time || f.timestamp || Date.now()),
+      projection: f.projection || "EPSG:4326",
+      imageExtent: Array.isArray(f.imageExtent) ? f.imageExtent : geoBounds,
+      imageWidth: Number(f.imageWidth || 0),
+      imageHeight: Number(f.imageHeight || 0),
+    }))
+    .filter(
+      (f) =>
+        f.url && Array.isArray(f.imageExtent) && f.imageExtent.length === 4,
+    )
+    .sort((a, b) => a.timestamp - b.timestamp);
+  satelliteRdtFramesByKey.set(framesCacheKey, normalizedRaw);
+  warmSatelliteFramesInBackground(framesCacheKey, normalizedRaw, false);
   return normalizedRaw;
 }
 
@@ -2889,7 +3113,11 @@ function warmNowcastFramesInBackground(layer, framesList) {
   })();
 }
 
-function warmSatelliteFramesInBackground(cacheKey, framesList) {
+function warmSatelliteFramesInBackground(
+  cacheKey,
+  framesList,
+  useStyle = true,
+) {
   const target = Array.isArray(framesList) ? framesList : [];
   if (!target.length) return;
   (async () => {
@@ -2897,7 +3125,7 @@ function warmSatelliteFramesInBackground(cacheKey, framesList) {
       const frame = target[i];
       if (!frame?.sourceUrl) continue;
       try {
-        const localUrl = await getSatelliteBlobUrlCached(frame.sourceUrl);
+        const localUrl = await getSatelliteBlobUrlCached(frame.sourceUrl, useStyle);
         frame.url = localUrl;
       } catch (e) {
         console.warn(`Satellite warmup failed (${cacheKey} #${i + 1}):`, e);
@@ -2934,8 +3162,8 @@ async function getNowcastBlobUrlCached(sourceUrl, sourceKey = "") {
   return localUrl;
 }
 
-async function getSatelliteBlobUrlCached(sourceUrl) {
-  const styleCacheKey = getSatelliteStyleCacheKey(sourceUrl);
+async function getSatelliteBlobUrlCached(sourceUrl, useStyle = true) {
+  const styleCacheKey = getSatelliteStyleCacheKey(sourceUrl, useStyle);
   if (satelliteBlobUrlCache.has(styleCacheKey)) {
     return satelliteBlobUrlCache.get(styleCacheKey);
   }
@@ -2944,7 +3172,7 @@ async function getSatelliteBlobUrlCached(sourceUrl) {
     throw new Error(`Satellite frame HTTP ${response.status}`);
   }
   const blob = await response.blob();
-  const styledBlob = await styleSatelliteTileCTA(blob);
+  const styledBlob = useStyle ? await styleSatelliteTileCTA(blob) : blob;
   const localUrl = URL.createObjectURL(styledBlob);
   satelliteBlobUrlCache.set(styleCacheKey, localUrl);
   satelliteBlobUrlOrder.push(styleCacheKey);
@@ -3114,12 +3342,26 @@ async function switchSource(layerOrHd) {
       setSourceSelectValue(activeSource || SOURCE_HD);
       return;
     }
+    let rdtFrames = [];
+    if (satelliteRdtEnabled) {
+      try {
+        rdtFrames = await loadSatelliteRdtFrames();
+      } catch (e) {
+        console.warn("RDT layer load failed:", e);
+        setStatus(
+          `RDT временно недоступен: ${e?.message || "ошибка загрузки"}`,
+        );
+      }
+      if (switchToken !== sourceSwitchToken) return;
+    }
     activeSource = SOURCE_SATELLITE;
+    satelliteRdtFrames = rdtFrames;
     setSourceSelectValue(activeSource);
     renderActiveLegend();
     baseLayer?.setVisible(false);
     frameLayer?.setVisible(true);
     satelliteLayer?.setVisible(false);
+    satelliteRdtLayer?.setVisible(false);
     satelliteReferenceLayer?.setVisible(true);
     frameLayer?.setOpacity(1);
     updateSatelliteStylePanelVisibility();
@@ -3147,6 +3389,8 @@ async function switchSource(layerOrHd) {
     baseLayer?.setVisible(true);
     frameLayer?.setVisible(true);
     satelliteLayer?.setVisible(false);
+    satelliteRdtLayer?.setVisible(false);
+    satelliteRdtFrames = [];
     satelliteReferenceLayer?.setVisible(false);
     frameLayer?.setOpacity(HD_LAYER_OPACITY);
     updateSatelliteStylePanelVisibility();
@@ -3176,6 +3420,8 @@ async function switchSource(layerOrHd) {
   baseLayer?.setVisible(true);
   frameLayer?.setVisible(true);
   satelliteLayer?.setVisible(false);
+  satelliteRdtLayer?.setVisible(false);
+  satelliteRdtFrames = [];
   satelliteReferenceLayer?.setVisible(false);
   frameLayer?.setOpacity(NOWCAST_LAYER_OPACITY);
   updateSatelliteStylePanelVisibility();
@@ -3201,6 +3447,7 @@ async function renderFrame(index) {
     satelliteLayer?.setSource(source);
     frameLayer?.setVisible(false);
     satelliteLayer?.setVisible(true);
+    satelliteRdtLayer?.setVisible(false);
     satelliteReferenceLayer?.setVisible(activeSource === SOURCE_SATELLITE);
     timelineEl.value = String(currentFrame);
     timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
@@ -3272,6 +3519,26 @@ async function renderFrame(index) {
     projection,
     activeSource === SOURCE_SATELLITE,
   );
+  if (activeSource === SOURCE_SATELLITE && satelliteRdtEnabled) {
+    const rdtFrame = findNearestFrameByTimestamp(
+      frame,
+      satelliteRdtFrames,
+      SATELLITE_RDT_MATCH_WINDOW_MS,
+    );
+    if (rdtFrame?.url && Array.isArray(rdtFrame.imageExtent)) {
+      setSatelliteRdtExtentAndUrl(
+        rdtFrame.imageExtent,
+        rdtFrame.url,
+        rdtFrame.projection || projection,
+        true,
+      );
+      satelliteRdtLayer?.setVisible(true);
+    } else {
+      satelliteRdtLayer?.setVisible(false);
+    }
+  } else {
+    satelliteRdtLayer?.setVisible(false);
+  }
   timelineEl.value = String(currentFrame);
   timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
   setStatus(`${currentFrame + 1}/${frames.length}`);
@@ -3444,6 +3711,12 @@ function bindControls() {
       satelliteBaseMode,
       mobileSatelliteColorizedToggleEl.checked,
     );
+  });
+  satelliteRdtToggleEl?.addEventListener("change", async () => {
+    await applySatelliteRdtSettings(satelliteRdtToggleEl.checked);
+  });
+  mobileSatelliteRdtToggleEl?.addEventListener("change", async () => {
+    await applySatelliteRdtSettings(mobileSatelliteRdtToggleEl.checked);
   });
 }
 

@@ -1298,6 +1298,7 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	w.Header().Set("Content-Type", "application/json")
 	requestedLayer := strings.TrimSpace(r.URL.Query().Get("layer"))
+	requestedStyle := strings.TrimSpace(r.URL.Query().Get("style"))
 	if requestedLayer == "" {
 		requestedLayer = strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER"))
 	}
@@ -1307,7 +1308,7 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 	limit := parseQueryInt(r, "limit", 18, 1, 72)
 	cadenceMin := parseQueryInt(r, "cadenceMin", 10, 5, 60)
 	cadence := time.Duration(cadenceMin) * time.Minute
-	log.Printf("[satellite/frames] request: layer=%q limit=%d cadence=%dmin", requestedLayer, limit, cadenceMin)
+	log.Printf("[satellite/frames] request: layer=%q style=%q limit=%d cadence=%dmin", requestedLayer, requestedStyle, limit, cadenceMin)
 	token, err := getEUMETViewAccessToken(r.Context())
 	authMode := "token"
 	if err != nil {
@@ -1378,13 +1379,14 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 	baseUsed := preferredEUMETWMSBases()[0]
 	warmTasks := make([]satelliteWarmTask, 0, len(picked))
 	for _, tStr := range picked {
-		cacheKey := "img:" + satelliteImageCanonicalCacheKey(baseUsed, sourceID, layer, tStr, imageExtent, width, height)
+		cacheKey := "img:" + satelliteImageCanonicalCacheKey(baseUsed, sourceID, layer, requestedStyle, tStr, imageExtent, width, height)
 		if _, _, ok := readSatelliteCache(cacheKey, satelliteImageCacheMaxAge(tStr)); ok {
 			cacheHit++
 		} else {
 			cacheMiss++
 			warmTasks = append(warmTasks, satelliteWarmTask{
 				layer:   layer,
+				style:   requestedStyle,
 				timeStr: tStr,
 				bounds:  imageExtent,
 				width:   width,
@@ -1392,15 +1394,19 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 				token:   token,
 			})
 		}
+		frameURL := "/api/satellite/image?layer=" + url.QueryEscape(layer) +
+			"&time=" + url.QueryEscape(tStr) +
+			"&west=" + url.QueryEscape(strconv.FormatFloat(west, 'f', 6, 64)) +
+			"&south=" + url.QueryEscape(strconv.FormatFloat(south, 'f', 6, 64)) +
+			"&east=" + url.QueryEscape(strconv.FormatFloat(east, 'f', 6, 64)) +
+			"&north=" + url.QueryEscape(strconv.FormatFloat(north, 'f', 6, 64)) +
+			"&width=" + url.QueryEscape(strconv.Itoa(width)) +
+			"&height=" + url.QueryEscape(strconv.Itoa(height))
+		if requestedStyle != "" {
+			frameURL += "&style=" + url.QueryEscape(requestedStyle)
+		}
 		frames = append(frames, satelliteFrameInfo{
-			URL: "/api/satellite/image?layer=" + url.QueryEscape(layer) +
-				"&time=" + url.QueryEscape(tStr) +
-				"&west=" + url.QueryEscape(strconv.FormatFloat(west, 'f', 6, 64)) +
-				"&south=" + url.QueryEscape(strconv.FormatFloat(south, 'f', 6, 64)) +
-				"&east=" + url.QueryEscape(strconv.FormatFloat(east, 'f', 6, 64)) +
-				"&north=" + url.QueryEscape(strconv.FormatFloat(north, 'f', 6, 64)) +
-				"&width=" + url.QueryEscape(strconv.Itoa(width)) +
-				"&height=" + url.QueryEscape(strconv.Itoa(height)),
+			URL:         frameURL,
 			Time:        tStr,
 			Projection:  "EPSG:4326",
 			ImageExtent: imageExtent,
@@ -1444,6 +1450,7 @@ func handleSatelliteFrames(w http.ResponseWriter, r *http.Request) {
 func handleSatelliteImageProxy(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	layer := strings.TrimSpace(r.URL.Query().Get("layer"))
+	style := strings.TrimSpace(r.URL.Query().Get("style"))
 	if layer == "" {
 		layer = strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER"))
 	}
@@ -1464,8 +1471,8 @@ func handleSatelliteImageProxy(w http.ResponseWriter, r *http.Request) {
 	width := parseQueryInt(r, "width", defW, 128, 8192)
 	height := parseQueryInt(r, "height", defH, 128, 8192)
 	log.Printf(
-		"[satellite/image] request: layer=%q time=%s size=%dx%d bounds=[%.4f %.4f %.4f %.4f]",
-		layer, timeStr, width, height, west, south, east, north,
+		"[satellite/image] request: layer=%q style=%q time=%s size=%dx%d bounds=[%.4f %.4f %.4f %.4f]",
+		layer, style, timeStr, width, height, west, south, east, north,
 	)
 	token, err := getEUMETViewAccessToken(r.Context())
 	if err != nil {
@@ -1476,6 +1483,7 @@ func handleSatelliteImageProxy(w http.ResponseWriter, r *http.Request) {
 		r.Context(),
 		token,
 		layer,
+		style,
 		timeStr,
 		[4]float64{west, south, east, north},
 		width,
@@ -1516,22 +1524,17 @@ func syncExternalSources(reason string) {
 }
 
 func syncExternalSourcesWithContext(ctx context.Context) error {
-	var errs []error
 	if err := syncNowcastFrames(ctx); err != nil {
 		log.Printf("[sync] nowcast error: %v", err)
-		errs = append(errs, fmt.Errorf("nowcast: %w", err))
+		return fmt.Errorf("nowcast: %w", err)
 	}
 	if err := syncSatelliteFrames(ctx); err != nil {
 		log.Printf("[sync] satellite error: %v", err)
-		errs = append(errs, fmt.Errorf("satellite: %w", err))
-	}
-	if len(errs) == 0 {
+		// Спутниковый префетч не должен блокировать запуск сервиса:
+		// при сетевых таймаутах продолжаем работу, догрузка произойдет позже.
 		return nil
 	}
-	if len(errs) == 1 {
-		return errs[0]
-	}
-	return fmt.Errorf("%v; %v", errs[0], errs[1])
+	return nil
 }
 
 func syncNowcastFrames(ctx context.Context) error {
@@ -1616,7 +1619,10 @@ func syncNowcastFrames(ctx context.Context) error {
 }
 
 func syncSatelliteFrames(ctx context.Context) error {
-	requestedLayer := "auto"
+	requestedLayer := strings.TrimSpace(os.Getenv("EUMETVIEW_LAYER"))
+	if requestedLayer == "" {
+		requestedLayer = "auto"
+	}
 	token, err := getEUMETViewAccessToken(ctx)
 	authMode := "token"
 	if err != nil {
@@ -1665,7 +1671,7 @@ func syncSatelliteFrames(ctx context.Context) error {
 		}
 		layerCount++
 		for _, tStr := range picked {
-			base, _, _, status, err := fetchSatelliteImageWithFallback(ctx, token, layer, tStr, bounds, width, height, true)
+			base, _, _, status, err := fetchSatelliteImageWithFallback(ctx, token, layer, "", tStr, bounds, width, height, true)
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return err
@@ -1677,7 +1683,7 @@ func syncSatelliteFrames(ctx context.Context) error {
 				log.Printf("[sync/satellite] upstream non-200 layer=%s time=%s status=%d", layer, tStr, status)
 				continue
 			}
-			cacheKey := satelliteImageCanonicalCacheKey(base, sourceID, layer, tStr, bounds, width, height)
+			cacheKey := satelliteImageCanonicalCacheKey(base, sourceID, layer, "", tStr, bounds, width, height)
 			keep["img:"+cacheKey] = struct{}{}
 			fetched++
 		}
@@ -1695,6 +1701,7 @@ func syncSatelliteFrames(ctx context.Context) error {
 
 type satelliteWarmTask struct {
 	layer   string
+	style   string
 	timeStr string
 	bounds  [4]float64
 	width   int
@@ -1734,6 +1741,7 @@ func warmSatelliteTasks(tasks []satelliteWarmTask) {
 			ctx,
 			task.token,
 			task.layer,
+			task.style,
 			task.timeStr,
 			task.bounds,
 			task.width,
@@ -1949,6 +1957,7 @@ func fetchSatelliteImageWithFallback(
 	ctx context.Context,
 	token string,
 	layer string,
+	style string,
 	timeStr string,
 	bounds [4]float64,
 	width int,
@@ -1965,6 +1974,7 @@ func fetchSatelliteImageWithFallback(
 			base,
 			token,
 			layer,
+			style,
 			timeStr,
 			bounds,
 			width,
@@ -1990,6 +2000,7 @@ func fetchSatelliteImageAndMaybeCache(
 	wmsBase string,
 	token string,
 	layer string,
+	style string,
 	timeStr string,
 	bounds [4]float64,
 	width int,
@@ -2003,7 +2014,7 @@ func fetchSatelliteImageAndMaybeCache(
 	values.Set("VERSION", "1.3.0")
 	values.Set("REQUEST", "GetMap")
 	values.Set("LAYERS", layer)
-	values.Set("STYLES", "")
+	values.Set("STYLES", strings.TrimSpace(style))
 	values.Set("FORMAT", "image/png")
 	values.Set("TRANSPARENT", "TRUE")
 	// CRS:84 исключает неоднозначность порядка осей (lon,lat).
@@ -2250,6 +2261,21 @@ func resolveEUMETLayer(
 			"msg fes ir108 hrv":         {"msg_fes:ir108", "msg_iodc:ir108"},
 			"msg_fes ir108 hrv":         {"msg_fes:ir108", "msg_iodc:ir108"},
 			"msg_fes:ir108_hrv":         {"msg_fes:ir108", "msg_iodc:ir108"},
+			"true colour rgb mtg 0 degree": {
+				"mtg_fd:rgb_geocolour",
+				"mtg_fd:rgb_truecolour",
+			},
+			"true color rgb mtg 0 degree": {
+				"mtg_fd:rgb_geocolour",
+				"mtg_fd:rgb_truecolour",
+			},
+			"mtg_fd:rgb_geocolour": {
+				"mtg_fd:rgb_geocolour",
+			},
+			"mtg_fd:rgb_truecolour": {
+				"mtg_fd:rgb_truecolour",
+				"mtg_fd:rgb_geocolour",
+			},
 		}
 		candidates := aliases[key]
 		for _, candidate := range candidates {
@@ -2266,6 +2292,11 @@ func resolveEUMETLayer(
 		}
 		if resolved := resolveByAlias(req); resolved != "" {
 			return resolved, strings.TrimSpace(layerTitles[resolved]), nil
+		}
+		// Если пользователь передал явный layer-id (namespace:name),
+		// не подменяем его fuzzy-эвристикой на "похожий" слой (например Airmass).
+		if strings.Contains(req, ":") {
+			return "", "", fmt.Errorf("explicit layer %q has no available times (exact/alias match failed)", req)
 		}
 		reqNorm := norm(req)
 		for name, times := range layerTimes {
@@ -2626,6 +2657,7 @@ func satelliteImageCanonicalCacheKey(
 	wmsBase string,
 	sourceID string,
 	layer string,
+	style string,
 	timeStr string,
 	bounds [4]float64,
 	width int,
@@ -2638,7 +2670,7 @@ func satelliteImageCanonicalCacheKey(
 	values.Set("VERSION", "1.3.0")
 	values.Set("REQUEST", "GetMap")
 	values.Set("LAYERS", layer)
-	values.Set("STYLES", "")
+	values.Set("STYLES", strings.TrimSpace(style))
 	values.Set("FORMAT", "image/png")
 	values.Set("TRANSPARENT", "TRUE")
 	values.Set("CRS", "CRS:84")
