@@ -27,6 +27,7 @@ const NOWCAST_LAYER_LABELS = {
   bufr_dbz1: "Отражаемость (dbz)",
   bufr_precip: "Интенсивность осадков",
 };
+const DEFAULT_SOURCE = "bufr_phenomena";
 const NOWCAST_LAYER_ORDER = [
   "bufr_phenomena",
   "bufr_height",
@@ -68,6 +69,7 @@ const measureBtnEl = document.getElementById("measureBtn");
 const drawBtnEl = document.getElementById("drawBtn");
 const crosshairBtnEl = document.getElementById("crosshairBtn");
 const lightningToggleBtnEl = document.getElementById("lightningToggleBtn");
+const locationBtnEl = document.getElementById("locationBtn");
 const playBtnIconEl = document.getElementById("playBtnIcon");
 const playbackFrameCountEl = document.getElementById("playbackFrameCount");
 const sourceLayerSelectEl = document.getElementById("sourceLayerSelect");
@@ -101,6 +103,7 @@ const legendToggleEl = document.getElementById("legendToggle");
 const legendTitleTextEl = document.getElementById("legendTitleText");
 const legendRowsEl = document.getElementById("legendRows");
 const mobileLegendPanelEl = document.getElementById("mobileLegendPanel");
+const mobileLegendToggleEl = document.getElementById("mobileLegendToggle");
 const mobileLegendTitleTextEl = document.getElementById(
   "mobileLegendTitleText",
 );
@@ -120,6 +123,7 @@ let satelliteReferenceLayer;
 let measureLayer;
 let drawLayer;
 let lightningLayer;
+let userLocationLayer;
 let lightningPopupOverlay;
 let frames = [];
 let hdFrames = [];
@@ -143,6 +147,9 @@ let drawMode = false;
 let crosshairMode = false;
 let lightningOverlayEnabled = true;
 let lightningRequestToken = 0;
+let userLocationWatchId = null;
+let userLocationCoordinate = null;
+let userLocationFallbackInFlight = false;
 let measureStart = null;
 let measureEnd = null;
 let measurePointer = null;
@@ -554,11 +561,28 @@ function setSourceSelectValue(value) {
 function setMobileMenuOpen(open) {
   if (!mobileMenuDrawerEl || !mobileMenuBackdropEl) return;
   const isOpen = Boolean(open);
-  mobileMenuDrawerEl.classList.toggle("hidden", !isOpen);
-  mobileMenuBackdropEl.classList.toggle("hidden", !isOpen);
-  mobileMenuDrawerEl.classList.toggle("open", isOpen);
   mobileMenuDrawerEl.setAttribute("aria-hidden", String(!isOpen));
   mobileMenuToggleBtnEl?.setAttribute("aria-expanded", String(isOpen));
+
+  if (isOpen) {
+    mobileMenuDrawerEl.classList.remove("hidden", "closing");
+    mobileMenuBackdropEl.classList.remove("hidden", "closing");
+    requestAnimationFrame(() => {
+      mobileMenuDrawerEl.classList.add("open");
+    });
+    return;
+  }
+
+  mobileMenuDrawerEl.classList.remove("open");
+  mobileMenuDrawerEl.classList.add("closing");
+  mobileMenuBackdropEl.classList.add("closing");
+  window.setTimeout(() => {
+    if (mobileMenuDrawerEl.classList.contains("open")) return;
+    mobileMenuDrawerEl.classList.add("hidden");
+    mobileMenuBackdropEl.classList.add("hidden");
+    mobileMenuDrawerEl.classList.remove("closing");
+    mobileMenuBackdropEl.classList.remove("closing");
+  }, 240);
 }
 
 function setCrosshairMode(enabled) {
@@ -572,6 +596,209 @@ function setCrosshairMode(enabled) {
   if (crosshairMode) {
     inspectPrecipAtCrosshairCenter().catch(() => {});
   }
+}
+
+function getGeolocationErrorMessage(error) {
+  if (error?.code === error?.PERMISSION_DENIED) {
+    return "доступ к геолокации запрещён";
+  }
+  if (error?.code === error?.POSITION_UNAVAILABLE) {
+    return "координаты недоступны";
+  }
+  if (error?.code === error?.TIMEOUT) {
+    return "истекло время ожидания координат";
+  }
+  return error?.message || "не удалось определить местоположение";
+}
+
+function setLocationButtonActive(active) {
+  if (locationBtnEl) locationBtnEl.classList.toggle("active", Boolean(active));
+}
+
+function getSecureGeolocationHint() {
+  const host = window.location.hostname;
+  const isLocalhost =
+    host === "localhost" || host === "127.0.0.1" || host === "::1";
+  if (window.isSecureContext || isLocalhost) return "";
+  return "откройте страницу через https или http://localhost:8080";
+}
+
+function stopUserLocationTracking() {
+  if (userLocationWatchId === null || !("geolocation" in navigator)) return;
+  navigator.geolocation.clearWatch(userLocationWatchId);
+  userLocationWatchId = null;
+}
+
+async function fetchApproximateUserLocationByIp() {
+  const response = await fetch("/api/geolocation/ip", {
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const payload = await response.json();
+  const parsed = {
+    lat: Number(payload?.lat),
+    lon: Number(payload?.lon),
+    label: String(payload?.label || ""),
+  };
+  if (Number.isFinite(parsed.lat) && Number.isFinite(parsed.lon)) {
+    return parsed;
+  }
+  throw new Error("IP geolocation returned invalid coordinates");
+}
+
+function updateUserLocationFeature(coordinate, accuracyMeters) {
+  if (!userLocationLayer || !Array.isArray(coordinate)) return;
+  const source = userLocationLayer.getSource();
+  if (!source) return;
+
+  const features = [];
+  const accuracy = Number(accuracyMeters);
+  if (Number.isFinite(accuracy) && accuracy > 0) {
+    const accuracyFeature = new ol.Feature({
+      geometry: new ol.geom.Circle(coordinate, accuracy),
+    });
+    accuracyFeature.setStyle(
+      new ol.style.Style({
+        fill: new ol.style.Fill({ color: "rgba(9, 105, 218, 0.14)" }),
+        stroke: new ol.style.Stroke({
+          color: "rgba(9, 105, 218, 0.38)",
+          width: 1,
+        }),
+      }),
+    );
+    features.push(accuracyFeature);
+  }
+
+  const locationFeature = new ol.Feature({
+    geometry: new ol.geom.Point(coordinate),
+  });
+  locationFeature.setStyle(
+    new ol.style.Style({
+      image: new ol.style.Circle({
+        radius: 7,
+        fill: new ol.style.Fill({ color: "#0969da" }),
+        stroke: new ol.style.Stroke({
+          color: "#ffffff",
+          width: 3,
+        }),
+      }),
+    }),
+  );
+  features.push(locationFeature);
+
+  source.clear(true);
+  source.addFeatures(features);
+  userLocationLayer.changed();
+}
+
+function centerMapOnUserLocation() {
+  if (!map || !userLocationCoordinate) return;
+  const view = map.getView();
+  const zoom = Math.max(Number(view.getZoom()) || 0, 11);
+  view.animate({
+    center: userLocationCoordinate,
+    zoom,
+    duration: 350,
+  });
+}
+
+async function locateUserByIp(centerWhenReady = false) {
+  if (userLocationFallbackInFlight) return;
+  userLocationFallbackInFlight = true;
+  try {
+    setStatus("Местоположение: определяю примерное положение по IP…");
+    const result = await fetchApproximateUserLocationByIp();
+    userLocationCoordinate = ol.proj.fromLonLat([result.lon, result.lat]);
+    updateUserLocationFeature(userLocationCoordinate, 25_000);
+    setLocationButtonActive(true);
+    if (centerWhenReady) centerMapOnUserLocation();
+    setStatus(
+      result.label
+        ? `Примерное местоположение по IP: ${result.label}`
+        : "Примерное местоположение определено по IP",
+    );
+  } catch (e) {
+    console.warn("IP geolocation failed:", e);
+    setLocationButtonActive(false);
+    setStatus("Местоположение: не удалось определить даже примерно по IP");
+  } finally {
+    userLocationFallbackInFlight = false;
+  }
+}
+
+function startUserLocationTracking(
+  centerWhenReady = false,
+  allowApproximateFallback = false,
+) {
+  const secureHint = getSecureGeolocationHint();
+  if (secureHint) {
+    if (allowApproximateFallback) {
+      locateUserByIp(centerWhenReady).catch(() => {});
+    } else {
+      setStatus(`Местоположение: ${secureHint}`);
+    }
+    return;
+  }
+  if (!("geolocation" in navigator)) {
+    if (allowApproximateFallback) {
+      locateUserByIp(centerWhenReady).catch(() => {});
+    } else {
+      setStatus("Геолокация недоступна в этом браузере");
+    }
+    return;
+  }
+  if (userLocationWatchId !== null) {
+    if (centerWhenReady) centerMapOnUserLocation();
+    return;
+  }
+
+  let shouldCenter = Boolean(centerWhenReady);
+  userLocationWatchId = navigator.geolocation.watchPosition(
+    (position) => {
+      const lon = Number(position?.coords?.longitude);
+      const lat = Number(position?.coords?.latitude);
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+
+      userLocationCoordinate = ol.proj.fromLonLat([lon, lat]);
+      updateUserLocationFeature(
+        userLocationCoordinate,
+        position?.coords?.accuracy,
+      );
+      setLocationButtonActive(true);
+      if (shouldCenter) {
+        shouldCenter = false;
+        centerMapOnUserLocation();
+      }
+    },
+    (error) => {
+      if (allowApproximateFallback) {
+        console.info("Precise geolocation unavailable, falling back to IP:", error);
+      } else {
+        console.debug("User geolocation unavailable:", error);
+      }
+      stopUserLocationTracking();
+      setLocationButtonActive(false);
+      if (allowApproximateFallback) {
+        setStatus("Местоположение: точные координаты недоступны, пробую по IP…");
+        locateUserByIp(centerWhenReady).catch(() => {});
+      } else {
+        setStatus(`Местоположение: ${getGeolocationErrorMessage(error)}`);
+      }
+    },
+    {
+      enableHighAccuracy: true,
+      maximumAge: 30_000,
+      timeout: 8_000,
+    },
+  );
+}
+
+function locateUser() {
+  if (userLocationCoordinate) {
+    centerMapOnUserLocation();
+    return;
+  }
+  startUserLocationTracking(true, true);
 }
 
 function getSourceDisplayName(sourceKey) {
@@ -1127,7 +1354,7 @@ function setMeasureMode(enabled) {
 function createMap() {
   const projection = "EPSG:3857";
   baseLayer = new ol.layer.Tile({
-    source: new ol.source.OSM({ wrapX: false }),
+    source: new ol.source.OSM({ wrapX: false, attributions: [] }),
     opacity: 1,
     zIndex: 0,
   });
@@ -1227,6 +1454,13 @@ function createMap() {
     zIndex: 30,
   });
   map.addLayer(lightningLayer);
+
+  userLocationLayer = new ol.layer.Vector({
+    source: new ol.source.Vector(),
+    zIndex: 40,
+  });
+  map.addLayer(userLocationLayer);
+
   if (lightningPopupEl) {
     lightningPopupOverlay = new ol.Overlay({
       element: lightningPopupEl,
@@ -1769,6 +2003,112 @@ function setLightningOverlayEnabled(enabled) {
     return;
   }
   updateLightningVisibilityForFrame(true);
+}
+
+function padTimePart(value) {
+  return String(value).padStart(2, "0");
+}
+
+function getFrameTimeParts(timestamp) {
+  const date = timestamp instanceof Date ? timestamp : new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return null;
+  return {
+    day: padTimePart(date.getDate()),
+    month: padTimePart(date.getMonth() + 1),
+    year: String(date.getFullYear()),
+    hour: padTimePart(date.getHours()),
+    minute: padTimePart(date.getMinutes()),
+  };
+}
+
+function createTimeRollSegment(key, label) {
+  const segment = document.createElement("span");
+  segment.className = "time-roll-segment";
+  segment.dataset.timePart = key;
+  segment.setAttribute("aria-label", label);
+
+  const current = document.createElement("span");
+  current.className = "time-roll-value time-roll-current";
+  current.textContent = "—";
+  segment.appendChild(current);
+  return segment;
+}
+
+function appendTimeDivider(parent) {
+  const divider = document.createElement("span");
+  divider.className = "time-roll-divider";
+  divider.textContent = "|";
+  parent.appendChild(divider);
+}
+
+function ensureTimeLabelStructure() {
+  if (!timeLabelEl) return false;
+  if (timeLabelEl.dataset.timeRollReady === "1") return true;
+
+  timeLabelEl.textContent = "";
+  const datePill = document.createElement("div");
+  datePill.className = "time-pill time-date";
+  datePill.setAttribute("aria-label", "Дата кадра");
+  datePill.appendChild(createTimeRollSegment("day", "День"));
+  appendTimeDivider(datePill);
+  datePill.appendChild(createTimeRollSegment("month", "Месяц"));
+  appendTimeDivider(datePill);
+  datePill.appendChild(createTimeRollSegment("year", "Год"));
+
+  const timePill = document.createElement("div");
+  timePill.className = "time-pill time-clock";
+  timePill.setAttribute("aria-label", "Время кадра");
+  timePill.appendChild(createTimeRollSegment("hour", "Час"));
+  appendTimeDivider(timePill);
+  timePill.appendChild(createTimeRollSegment("minute", "Минута"));
+
+  timeLabelEl.append(datePill, timePill);
+  timeLabelEl.dataset.timeRollReady = "1";
+  return true;
+}
+
+function setTimeRollSegmentValue(segment, value) {
+  const nextValue = String(value);
+  const current = segment.querySelector(".time-roll-current");
+  if (!current || current.textContent === nextValue) return;
+
+  const outgoing = current;
+  const incoming = document.createElement("span");
+  outgoing.classList.remove("time-roll-current");
+  outgoing.classList.add("time-roll-out");
+  incoming.className = "time-roll-value time-roll-current time-roll-in";
+  incoming.textContent = nextValue;
+  segment.appendChild(incoming);
+
+  incoming.addEventListener(
+    "animationend",
+    () => {
+      segment.querySelectorAll(".time-roll-out").forEach((node) => node.remove());
+      incoming.classList.remove("time-roll-in");
+    },
+    { once: true },
+  );
+}
+
+function updateFrameTimeLabel(timestamp) {
+  if (!ensureTimeLabelStructure()) return;
+  const parts = getFrameTimeParts(timestamp);
+  if (!parts) {
+    timeLabelEl
+      .querySelectorAll(".time-roll-segment")
+      .forEach((segment) => setTimeRollSegmentValue(segment, "—"));
+    timeLabelEl.setAttribute("aria-label", "Время кадра неизвестно");
+    return;
+  }
+
+  for (const [key, value] of Object.entries(parts)) {
+    const segment = timeLabelEl.querySelector(`[data-time-part="${key}"]`);
+    if (segment) setTimeRollSegmentValue(segment, value);
+  }
+  timeLabelEl.setAttribute(
+    "aria-label",
+    `${parts.day}.${parts.month}.${parts.year} ${parts.hour}:${parts.minute}`,
+  );
 }
 
 function setFrameExtentAndUrl(extent, url, projection, interpolate = false) {
@@ -3450,7 +3790,7 @@ async function renderFrame(index) {
     satelliteRdtLayer?.setVisible(false);
     satelliteReferenceLayer?.setVisible(activeSource === SOURCE_SATELLITE);
     timelineEl.value = String(currentFrame);
-    timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
+    updateFrameTimeLabel(frame.timestamp);
     setStatus(`${currentFrame + 1}/${frames.length}`);
     updateLightningVisibilityForFrame(true);
     inspectPrecipAtCrosshairCenter().catch(() => {});
@@ -3540,7 +3880,7 @@ async function renderFrame(index) {
     satelliteRdtLayer?.setVisible(false);
   }
   timelineEl.value = String(currentFrame);
-  timeLabelEl.textContent = frame.timestamp.toLocaleString("ru-RU");
+  updateFrameTimeLabel(frame.timestamp);
   setStatus(`${currentFrame + 1}/${frames.length}`);
   updateLightningVisibilityForFrame(true);
   inspectPrecipAtCrosshairCenter().catch(() => {});
@@ -3621,8 +3961,15 @@ function bindControls() {
     setLightningOverlayEnabled(!lightningOverlayEnabled);
   };
   lightningToggleBtnEl?.addEventListener("click", onLightningToggle);
+  locationBtnEl?.addEventListener("click", locateUser);
   legendToggleEl?.addEventListener("click", () => {
     legendPanelEl?.classList.toggle("legend-collapsed");
+  });
+  mobileLegendToggleEl?.addEventListener("click", () => {
+    const collapsed = mobileLegendPanelEl?.classList.toggle(
+      "mobile-legend-collapsed",
+    );
+    mobileLegendToggleEl.setAttribute("aria-expanded", String(!collapsed));
   });
   mobileMenuToggleBtnEl?.addEventListener("click", () => {
     setMobileMenuOpen(true);
@@ -3802,22 +4149,31 @@ async function init() {
     setLightningOverlayEnabled(true);
     renderActiveLegend();
     upsertRadarLayer();
+    let initialSource = SOURCE_HD;
     try {
       await loadNowcastMeta();
       rebuildSourceOptions();
+      const hasDefaultSource = Array.from(sourceLayerSelectEl?.options || []).some(
+        (opt) => opt.value === DEFAULT_SOURCE,
+      );
+      if (hasDefaultSource) initialSource = DEFAULT_SOURCE;
     } catch (e) {
       console.warn("4x4 meta load failed:", e);
     }
     updateSatelliteStylePanelVisibility();
-    setStatus(`Готово. Радаров: ${radars.length}`);
 
     timelineEl.min = "0";
     timelineEl.max = String(Math.max(0, frames.length - 1));
     timelineEl.value = "0";
-    await renderFrame(0);
-    updateLightningVisibilityForFrame(true);
-    if (frames.length > 1) startPlayback();
-    else updatePlayButton();
+    try {
+      await switchSource(initialSource);
+      if (initialSource !== SOURCE_HD && activeSource !== initialSource) {
+        await switchSource(SOURCE_HD);
+      }
+    } catch (e) {
+      console.warn("Initial source switch failed:", e);
+      await switchSource(SOURCE_HD);
+    }
     dataRefreshTimer = setInterval(refreshData, DATA_REFRESH_MS);
   } catch (e) {
     console.error(e);

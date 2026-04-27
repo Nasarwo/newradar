@@ -140,6 +140,7 @@ var (
 	thinSplineEnabled  = false
 	thinSplineState    thinSplineRuntime
 	lightningHTTP      = &http.Client{Timeout: 20 * time.Second}
+	geolocationHTTP    = &http.Client{Timeout: 8 * time.Second}
 	nowcastHTTP        = &http.Client{Timeout: 35 * time.Second}
 	satelliteHTTP      = &http.Client{Timeout: 35 * time.Second}
 	gld360CacheMu      sync.Mutex
@@ -335,6 +336,7 @@ func main() {
 	// Routes
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/api/radar/latest", handleLatest)
+	http.HandleFunc("/api/geolocation/ip", handleIPGeolocation)
 	http.HandleFunc("/api/lightning/free/latest", handleLightningFreeLatest)
 	http.HandleFunc("/api/lightning/gld360/latest", handleLightningGLD360Latest)
 	http.HandleFunc("/api/nowcast/meta", handleNowcastMeta)
@@ -556,6 +558,124 @@ func handleLatest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+type ipGeolocationResult struct {
+	Lat   float64 `json:"lat"`
+	Lon   float64 `json:"lon"`
+	Label string  `json:"label,omitempty"`
+}
+
+func handleIPGeolocation(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	result, err := fetchIPGeolocation(r.Context())
+	if err != nil {
+		log.Printf("[geolocation/ip] failed: %v", err)
+		http.Error(w, "IP geolocation failed", http.StatusBadGateway)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+func fetchIPGeolocation(ctx context.Context) (ipGeolocationResult, error) {
+	type provider struct {
+		url   string
+		parse func([]byte) (ipGeolocationResult, error)
+	}
+	providers := []provider{
+		{
+			url: "https://ipapi.co/json/",
+			parse: func(body []byte) (ipGeolocationResult, error) {
+				var payload struct {
+					Latitude    float64 `json:"latitude"`
+					Longitude   float64 `json:"longitude"`
+					City        string  `json:"city"`
+					CountryName string  `json:"country_name"`
+				}
+				if err := json.Unmarshal(body, &payload); err != nil {
+					return ipGeolocationResult{}, err
+				}
+				return ipGeolocationResult{
+					Lat:   payload.Latitude,
+					Lon:   payload.Longitude,
+					Label: joinNonEmpty(", ", payload.City, payload.CountryName),
+				}, nil
+			},
+		},
+		{
+			url: "https://ipwho.is/",
+			parse: func(body []byte) (ipGeolocationResult, error) {
+				var payload struct {
+					Success   bool    `json:"success"`
+					Latitude  float64 `json:"latitude"`
+					Longitude float64 `json:"longitude"`
+					City      string  `json:"city"`
+					Country   string  `json:"country"`
+					Message   string  `json:"message"`
+				}
+				if err := json.Unmarshal(body, &payload); err != nil {
+					return ipGeolocationResult{}, err
+				}
+				if !payload.Success && payload.Message != "" {
+					return ipGeolocationResult{}, errors.New(payload.Message)
+				}
+				return ipGeolocationResult{
+					Lat:   payload.Latitude,
+					Lon:   payload.Longitude,
+					Label: joinNonEmpty(", ", payload.City, payload.Country),
+				}, nil
+			},
+		},
+	}
+
+	var lastErr error
+	for _, p := range providers {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", nowcastUserAgent)
+		resp, err := geolocationHTTP.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("%s returned HTTP %d", p.url, resp.StatusCode)
+			continue
+		}
+		result, err := p.parse(body)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if NumberIsFinite(result.Lat) && NumberIsFinite(result.Lon) {
+			return result, nil
+		}
+		lastErr = fmt.Errorf("%s returned invalid coordinates", p.url)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no IP geolocation providers configured")
+	}
+	return ipGeolocationResult{}, lastErr
+}
+
+func joinNonEmpty(sep string, parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return strings.Join(out, sep)
 }
 
 func handleLightningFreeLatest(w http.ResponseWriter, r *http.Request) {

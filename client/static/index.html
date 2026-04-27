@@ -15,7 +15,7 @@
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/ol@10.6.1/ol.css"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=20260417_17" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260417_39" />
   </head>
   <body>
     <div id="map"></div>
@@ -28,7 +28,9 @@
     >
       <span class="btn-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" focusable="false">
-          <path d="M4 7h16v2H4zM4 11h16v2H4zM4 15h16v2H4z"></path>
+          <path
+            d="M4 7.25A1.25 1.25 0 0 1 5.25 6h13.5a1.25 1.25 0 1 1 0 2.5H5.25A1.25 1.25 0 0 1 4 7.25zm0 4.75a1.25 1.25 0 0 1 1.25-1.25h13.5a1.25 1.25 0 1 1 0 2.5H5.25A1.25 1.25 0 0 1 4 12zm1.25 4.75a1.25 1.25 0 1 0 0 2.5h13.5a1.25 1.25 0 1 0 0-2.5H5.25z"
+          ></path>
         </svg>
       </span>
     </button>
@@ -91,17 +93,29 @@
           <span>Быстро развивающиеся грозы</span>
         </label>
       </div>
-      <div class="mobile-menu-section" id="mobileLegendPanel">
-        <div class="mobile-section-title" id="mobileLegendTitleText">
-          Легенда
-        </div>
+    </aside>
+    <div
+      class="mobile-legend-panel mobile-legend-collapsed"
+      id="mobileLegendPanel"
+    >
+      <button
+        class="mobile-legend-toggle"
+        id="mobileLegendToggle"
+        type="button"
+        aria-expanded="false"
+        aria-controls="mobileLegendBody"
+      >
+        <span id="mobileLegendTitleText">Легенда</span>
+        <span class="mobile-legend-toggle-icon" aria-hidden="true">▼</span>
+      </button>
+      <div class="mobile-legend-body" id="mobileLegendBody">
         <div class="mobile-legend-wrap">
           <table>
             <tbody id="mobileLegendRows"></tbody>
           </table>
         </div>
       </div>
-    </aside>
+    </div>
     <div
       class="map-crosshair hidden"
       id="mapCrosshair"
@@ -142,7 +156,7 @@
       </label>
       <label class="toggle-row satellite-colorized-toggle">
         <input type="checkbox" id="satelliteRdtToggle" />
-        <span>Rapidly Developing Thunderstorms</span>
+        <span>Быстро развивающиеся грозы</span>
       </label>
     </div>
 
@@ -203,7 +217,7 @@
               </span>
             </button>
           </div>
-          <span class="time-label" id="timeLabel">—</span>
+          <div class="time-label" id="timeLabel" aria-live="polite"></div>
         </div>
         <div class="tools-row">
           <div class="tool-btns">
@@ -252,7 +266,33 @@
                 </svg>
               </span>
             </button>
+            <button
+              class="tool-btn"
+              type="button"
+              id="locationBtn"
+              title="Показать моё местоположение"
+              aria-label="Показать моё местоположение"
+            >
+              <span class="btn-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path
+                    d="M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8zm0-6 1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"
+                  ></path>
+                </svg>
+              </span>
+            </button>
           </div>
+        </div>
+        <div class="playback-settings">
+          <span>Кадров в цикле:</span>
+          <select
+            id="playbackFrameCount"
+            title="Сколько последних кадров крутить"
+          >
+            <option value="6">6</option>
+            <option value="12">12</option>
+            <option value="18" selected>18</option>
+          </select>
         </div>
       </div>
       <input
@@ -266,21 +306,10 @@
         aria-hidden="true"
         tabindex="-1"
       />
-      <div class="playback-settings">
-        <span>Кадров в цикле:</span>
-        <select
-          id="playbackFrameCount"
-          title="Сколько последних кадров крутить"
-        >
-          <option value="6">6</option>
-          <option value="12">12</option>
-          <option value="18" selected>18</option>
-        </select>
-      </div>
       <div class="status" id="status">Загрузка данных…</div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/ol@10.6.1/dist/ol.js"></script>
-    <script src="/static/app.js?v=20260418_07"></script>
+    <script src="/static/app.js?v=20260418_16"></script>
   </body>
 </html>
